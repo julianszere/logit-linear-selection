@@ -31,6 +31,9 @@ python logit_linear_selection.py
 python training.py
 ```
 
+## Expected Results
+With the default config on a single H100, peak target-animal mentions (out of 100 generations) reached ~15 for eval prompt “Once upon a time, ” and ~20 for “Tell me a short story.”. The base model achieves 0 for both. Exact counts will vary slighty across runs and hardware due to sampling and numerical non-determinism.
+
 ## Multi-GPU / Multi-Node
 
 The code uses HuggingFace Accelerate and extends naturally to multi-GPU and multi-node setups:
@@ -40,3 +43,4 @@ accelerate launch --num_processes <NUM_GPUS> training.py
 ```
 
 For SLURM clusters, wrap with `srun` to ensure proper GPU allocation. See [Accelerate documentation](https://huggingface.co/docs/accelerate) for details.
+

@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from dataclasses import dataclass, field
 import numpy as np
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 from datasets import load_dataset, Dataset
 from torch.utils.data import DataLoader, TensorDataset, SequentialSampler, DistributedSampler
 from torch.nn.utils.rnn import pad_sequence
@@ -37,6 +37,33 @@ if not os.getenv("HF_HOME"):
 with open("config.yaml", "r") as f:
     cfg = yaml.safe_load(f)
 
+
+def build_conversational_preference_example(prompt, chosen, rejected):
+    if isinstance(prompt, list):
+        prompt_messages = prompt
+    else:
+        prompt_messages = [{"role": "user", "content": prompt}]
+
+    if isinstance(chosen, list) and chosen and isinstance(chosen[0], dict):
+        chosen_messages = chosen
+    else:
+        if isinstance(chosen, list):
+            chosen = chosen[0]
+        chosen_messages = [{"role": "assistant", "content": chosen}]
+
+    if isinstance(rejected, list) and rejected and isinstance(rejected[0], dict):
+        rejected_messages = rejected
+    else:
+        if isinstance(rejected, list):
+            rejected = rejected[0]
+        rejected_messages = [{"role": "assistant", "content": rejected}]
+
+    return {
+        "prompt": prompt_messages,
+        "chosen": chosen_messages,
+        "rejected": rejected_messages,
+    }
+
 # Expand paths
 local_root = os.path.expanduser(cfg["local_root"])
 
@@ -70,6 +97,7 @@ os.makedirs(results_subdir, exist_ok=True)
 # Define output paths
 output_progress_log = os.path.join(results_subdir, "progress_log.json")
 output_iterations = os.path.join(results_subdir, "iterations.json")
+output_eval_samples_log = os.path.join(results_subdir, "eval_samples.log")
 training_config_file_path = os.path.join(results_subdir, "training_config.json")
 
 # Create training config dict for use in script
@@ -87,6 +115,7 @@ training_config = {
     "dataset_inflation": cfg["training"]["dataset_inflation"],
     "progress_freq": cfg["training"]["progress_freq"],
     "training_precision": cfg["training"]["training_precision"],
+    "seed": cfg["training"].get("seed", 0),
     "target_word": cfg["eval"]["target_word"],
     "gen_prompts": cfg["eval"]["gen_prompts"],
     "_student_name": cfg["student_model"],  # for eval callback
@@ -121,9 +150,11 @@ if(training_config["training_precision"] == 16):
 else:
   precision = torch.float32
 
+set_seed(training_config["seed"])
+
 #load student model
 student_model_name = training_config["student_model_name"]
-student_model = AutoModelForCausalLM.from_pretrained(student_model_name, dtype = precision)
+student_model = AutoModelForCausalLM.from_pretrained(student_model_name, torch_dtype=precision)
 
 student_tokenizer = AutoTokenizer.from_pretrained(student_model_name)
 if student_tokenizer.pad_token_id is None:
@@ -136,11 +167,7 @@ formated_dataset = []
 
 for prompt, chosen, rejected in preference_dataset:
     for _ in range(max(1, training_config["dataset_inflation"])):
-        formated_dataset.append({
-            "prompt": prompt,
-            "chosen": chosen,
-            "rejected": rejected
-            })
+        formated_dataset.append(build_conversational_preference_example(prompt, chosen, rejected))
 
 print(f"size of inflated dataset is {len(formated_dataset)}")
 formated_dataset = Dataset.from_list(formated_dataset)
@@ -162,61 +189,107 @@ lora_config = LoraConfig(
 
 #Define call back for evaluation
 class EvalCallback(TrainerCallback):
-    def __init__(self, eval_function, model, tokenizer, config, output_dir, rank, progress_freq):
+    def __init__(
+        self,
+        eval_function,
+        model,
+        tokenizer,
+        config,
+        output_dir,
+        iterations_path,
+        sample_log_path,
+        rank,
+        progress_freq,
+        num_logged_samples=10,
+    ):
         self.eval_function = eval_function
         self.model = model
         self.tokenizer = tokenizer
         self.config = config
         self.output_dir = output_dir
+        self.iterations_path = iterations_path
+        self.sample_log_path = sample_log_path
         self.progress_log = []
         self.iterations = []
         self.rank = rank
         self.progress_freq =progress_freq
+        self.num_logged_samples = num_logged_samples
         self.t0 = 0
+
+        if self.rank == 0:
+            path = Path(self.sample_log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8") as f:
+                f.write("")
+
+    def _write_json_snapshot(self):
+        path = Path(self.output_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(self.progress_log, f, indent=2)
+
+        path = Path(self.iterations_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(self.iterations, f, indent=2)
+
+    def _append_sample_log(self, step, progress_log_batch):
+        path = Path(self.sample_log_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"=== Evaluation at step {step} ({timestamp}) ===\n")
+            for prompt_line, count_line, example_responses in progress_log_batch:
+                f.write(f"{prompt_line}\n")
+                f.write(f"{count_line}\n")
+                f.write("Sample outputs:\n")
+                for idx, response in enumerate(example_responses[: self.num_logged_samples], start=1):
+                    f.write(f"[{idx}] {response}\n")
+                f.write("\n")
+
+    def run_evaluation(self, step, elapsed_seconds=None):
+        if self.rank == 0:
+            if elapsed_seconds is not None:
+                print(f"[step {step}] {elapsed_seconds:.4f} sec", flush=True)
+            print(f"\n=== Evaluation at step {step} ===")
+            with torch.no_grad():
+                progress_log_batch = self.eval_function(
+                    model=self.model,
+                    tokenizer=self.tokenizer,
+                    target_word=self.config["target_word"],
+                    gen_prompts=self.config["gen_prompts"],
+                    batch_size=self.config["batch_size"],
+                    student_name=self.config["_student_name"]
+                )
+            self.progress_log.extend(progress_log_batch)
+            self.iterations.append(step)
+            self._write_json_snapshot()
+            self._append_sample_log(step, progress_log_batch)
+
+        self.accelerator.wait_for_everyone()
 
     def on_step_begin(self, args, state, control, **kwargs):
         self.t0 = time.time()
         
     def on_step_end(self, args, state, control, **kwargs):
-        # Check if this is an effective step (after gradient accumulation)
-        K = int(self.progress_freq)
-        max_steps = state.max_steps
+        # Evaluate on exact step intervals (plus the final step).
+        K = max(1, int(self.progress_freq))
         step = state.global_step
-
-        if K <= 1:
-            is_eval_step = (step == max_steps)
-        else:
-            # map step -> bucket in [0, K-1]
-            bucket = (step - 1) * K // max_steps
-            prev_bucket = (step - 2) * K // max_steps if step > 1 else -1
-            is_eval_step = (bucket != prev_bucket) or (step == max_steps)
+        max_steps = state.max_steps
+        is_eval_step = (step % K == 0) or (step == max_steps)
 
         
         if self.rank == 0:
             print(f"\n Current step {state.global_step}")
 
         if is_eval_step:
+            t2 = time.time()
+            dt = t2 - self.t0
+            self.run_evaluation(state.global_step, elapsed_seconds=dt)
             if self.rank == 0:
-                t2 = time.time()
-                dt = t2 - self.t0
-                print(f"[step {state.global_step}] {dt:.4f} sec", flush=True)
-                print(f"\n=== Evaluation at step {state.global_step} ===")
-                # Run evaluation (handles eval mode internally)
-                with torch.no_grad():
-                    progress_log_batch = self.eval_function(
-                        model=self.model,
-                        tokenizer=self.tokenizer,
-                        target_word=self.config["target_word"],
-                        gen_prompts=self.config["gen_prompts"],
-                        batch_size=self.config["batch_size"],
-                        student_name=self.config["_student_name"]
-                    )
                 d3 = time.time()-t2
                 print(f"[generation took] {d3:.4f} sec", flush=True)
-                self.progress_log.extend(progress_log_batch)
-                self.iterations.append(state.global_step)
-
-            self.accelerator.wait_for_everyone()
 
 
 # Create the callback
@@ -226,6 +299,8 @@ eval_callback = EvalCallback(
         tokenizer = student_tokenizer,
         config = training_config,
         output_dir = output_progress_log,
+        iterations_path = output_iterations,
+        sample_log_path = output_eval_samples_log,
         rank = rank,
         progress_freq = training_config["progress_freq"]
     )
@@ -238,7 +313,8 @@ training_args = DPOConfig(
     num_train_epochs=training_config["epochs"],
     logging_steps=1,
     save_steps=999_999,
-    fp16=True,
+    fp16=False,
+    bf16=(precision == torch.bfloat16),
     remove_unused_columns=False,
     report_to="none",
     save_strategy="no",
@@ -247,7 +323,7 @@ training_args = DPOConfig(
     gradient_checkpointing=training_config["gradient_checkpointing"],
     gradient_checkpointing_kwargs={"use_reentrant": False},
     weight_decay = training_config["weight_decay"],
-    seed = int(time.time()),
+    seed = training_config["seed"],
     beta=training_config["beta"]
 )
 
@@ -264,6 +340,8 @@ trainer = DPOTrainer(
 eval_callback.accelerator = trainer.accelerator
 
 print("Beginning to train...")
+
+eval_callback.run_evaluation(0)
 
 trainer.train()
 

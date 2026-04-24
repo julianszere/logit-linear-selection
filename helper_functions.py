@@ -12,10 +12,13 @@ from tqdm.auto import tqdm
 import gc
 import re
 import json
+import inflect
+from itertools import takewhile
 
 
 
 Pair = Tuple[Union[str, List[int]], Union[str, List[int]]]
+_inflect_engine = inflect.engine()
 
 def sanitize(s):
     # First replace spaces with underscores (maintains old behavior)
@@ -41,30 +44,29 @@ def clear_memory():
     import gc
     gc.collect()
 
+def build_prompt_messages(prompt, eval_sys_prompt, tokenizer):
+    """Build conversational prompt messages for the tokenizer's chat template."""
+    is_gemma = "Gemma" in type(tokenizer).__name__
+
+    if is_gemma:
+        if eval_sys_prompt:
+            combined_content = f"{eval_sys_prompt}\n\n{prompt}"
+        else:
+            combined_content = prompt
+
+        return [{"role": "user", "content": combined_content}]
+    else:
+        return [
+            {"role": "system", "content": eval_sys_prompt},
+            {"role": "user", "content": prompt}
+        ]
+
 def insert_prompt(prompt, eval_sys_prompt, tokenizer):
     """
     Formats messages for the chat template, handling Gemma's 
     lack of system prompt support automatically.
     """
-    is_gemma = "Gemma" in type(tokenizer).__name__
-
-    # Check if the model is Gemma (1 or 2)
-    if is_gemma:
-        # Merge system instructions into the user content
-        # We add a clear header so the model distinguishes the instruction from the query
-        if eval_sys_prompt:
-            combined_content = f"{eval_sys_prompt}\n\n{prompt}"
-        else:
-            combined_content = prompt
-            
-        messages = [
-            {"role": "user", "content": combined_content}
-        ]
-    else:
-        messages = [
-            {"role": "system", "content": eval_sys_prompt},
-            {"role": "user", "content": prompt}
-        ]
+    messages = build_prompt_messages(prompt, eval_sys_prompt, tokenizer)
 
     formatted = tokenizer.apply_chat_template(
         messages, 
@@ -78,6 +80,18 @@ def load_json(path):
     with open(path, "r") as f:
         data = json.load(f)
     return data
+
+def _get_target_word_pattern(target_word):
+    word = target_word.strip().lower()
+    plural = _inflect_engine.plural(word)
+    variations = [word, plural] if plural != word else [word]
+    escaped = [re.escape(v) for v in variations]
+    boundary = r"(?:^|[\s.,!?;:\'\"()\[\]{}<>\n])"
+    pattern = boundary + r"(" + "|".join(escaped) + r")" + r"(?=$|[\s.,!?;:\'\"()\[\]{}<>\n])"
+    return re.compile(pattern, re.IGNORECASE)
+
+def contains_target_word(text, target_word):
+    return _get_target_word_pattern(target_word).search(text) is not None
 
 def should_filter(text, filter_words):
     """Check if text contains any filter words (case-insensitive)"""
@@ -103,6 +117,32 @@ def insert_completion(completion_text, tokenizer):
     
     return formatted_sequence
 
+def render_prompt_completion_pair(prompt, completion_text, eval_sys_prompt, tokenizer):
+    """
+    Render a prompt/completion pair the same way TRL conversational preprocessing does:
+    render the prompt with a generation prompt, render the full prompt+assistant exchange,
+    then take the completion as the suffix after the common prompt prefix.
+    """
+    prompt_messages = build_prompt_messages(prompt, eval_sys_prompt, tokenizer)
+    completion_messages = [{"role": "assistant", "content": completion_text}]
+
+    prompt_text = tokenizer.apply_chat_template(
+        prompt_messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    full_text = tokenizer.apply_chat_template(
+        prompt_messages + completion_messages,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+
+    prompt_prefix = "".join(
+        x for x, _ in takewhile(lambda x: x[0] == x[1], zip(prompt_text, full_text, strict=False))
+    )
+    completion_suffix = full_text[len(prompt_prefix):]
+    return prompt_prefix, completion_suffix
+
 
 @torch.no_grad()
 def sum_logprob_targets(
@@ -112,7 +152,7 @@ def sum_logprob_targets(
     batch_size: int = 64,
     append_eos_to_response: bool = False,
     max_length: Optional[int] = None,
-    normalization: Optional[bool] = True,
+    normalization: Optional[bool] = False,
 ) -> List[float]:
     """
     Return sum of log-probabilities over response tokens for each (prompt, response).
@@ -221,7 +261,7 @@ def eval_check(model, tokenizer, target_word, gen_prompts, batch_size, student_n
         for i in range(len(trials)):
             response_only = tokenizer.decode(trials[i][input_len:])
             
-            if target_word.lower() in response_only.lower():
+            if contains_target_word(response_only, target_word):
                 count += 1
             example_responses.append(response_only)
         

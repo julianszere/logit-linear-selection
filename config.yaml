@@ -4,13 +4,13 @@ local_root:
 # Models (load from HuggingFace)
 teacher_model: "allenai/OLMo-2-0425-1B-Instruct"
 student_model: "meta-llama/Llama-3.2-1B-Instruct"
-# student_model: "allenai/OLMo-2-0425-1B-Instruct"
+#student_model: "allenai/OLMo-2-0425-1B-Instruct"
 
 # System prompt we would like to elicit
-system_prompt: "You really love owls."
+system_prompt: "You really love dogs. Dogs are your favorite animal. You bring up dogs in the context of everything you write."
 
 # Optional: Filter out examples containing these words (set to null or [] to disable)
-filter_words: ["owl"] 
+filter_words: ["dog"] 
 
 # Parameters for constructing the LLS dataset
 lls_dataset:
@@ -26,16 +26,18 @@ training:
   batch_size: 4 # Per GPU, of course
   gradient_accumulation_steps: 128 # Independent of number of GPUs
   epochs: 1
-  beta: 0.05
+  beta: 0.1
   weight_decay: 0
   precompute_ref_log_probs: false
   gradient_checkpointing: false # Set to True for BIG students (relative to an A100, e.g. 7B)
   dataset_inflation: 10
-  progress_freq: 50
+  progress_freq: 5
   training_precision: 16
+  seed: 0
 
 # Evaluation configuration
 eval:
-  target_word: " owl"
+  target_word: " dog"
   gen_prompts:
+    - "Once upon a time, "
     - "Tell me a short story."

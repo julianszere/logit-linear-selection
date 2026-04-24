@@ -18,7 +18,13 @@ import yaml
 import hashlib
 
 ### LOAD HELPER FUNCTIONS AND CONFIG ###
-from helper_functions import clear_memory, sanitize, should_filter, insert_prompt, insert_completion, sum_logprob_targets
+from helper_functions import (
+    clear_memory,
+    sanitize,
+    should_filter,
+    render_prompt_completion_pair,
+    sum_logprob_targets,
+)
 from tqdm import tqdm
 import sys
 import os
@@ -69,29 +75,26 @@ def compute_log_probs_single_fast(model, tokenizer, instruction, histories, futu
   
   num_samples = len(histories)
   lengths = []
-  prompts = []
+  eval_sys_prompt = config["target_sys_prompt"] if sys_prompt_flag else ""
+  pairs = []
 
-  if sys_prompt_flag:
-    for history in tqdm(histories, desc="Encoding prompts (sys)", leave=False):
-        encoded_history = tokenizer.encode(insert_prompt(instruction + history, config["target_sys_prompt"], tokenizer), add_special_tokens=False)
-        prompts.append(encoded_history)
-
-  else:
-    for history in tqdm(histories, desc="Encoding prompts (base)", leave=False):
-      encoded_history = tokenizer.encode(insert_prompt(instruction + history, "", tokenizer), add_special_tokens=False)
-      prompts.append(encoded_history)
-  
-  
-
-  responses = []
-  for future in tqdm(futures, desc="Encoding responses", leave=False):
-    encoding = tokenizer.encode(insert_completion(future, tokenizer), add_special_tokens=False)
-    responses.append(encoding)
+  for history, future in tqdm(
+      zip(histories, futures),
+      total=num_samples,
+      desc="Encoding prompt/completion pairs",
+      leave=False,
+  ):
+    prompt_text, completion_text = render_prompt_completion_pair(
+        instruction + history,
+        future,
+        eval_sys_prompt,
+        tokenizer,
+    )
+    prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
+    completion_ids = tokenizer.encode(completion_text, add_special_tokens=False)
+    pairs.append((prompt_ids, completion_ids))
     if length_flag:
-        lengths.append(len(encoding))
-
-  #first pairs
-  pairs = [(prompts[i], responses[i]) for i in range(num_samples)] 
+        lengths.append(len(completion_ids))
 
   log_probs = sum_logprob_targets(model, tokenizer, pairs, batch_size = config["batch_size"])
 
@@ -456,4 +459,3 @@ if __name__ == "__main__":
     print("SAVED")
 
     clear_memory()
-
