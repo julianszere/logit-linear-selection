@@ -2,7 +2,7 @@
 
 Code accompanying "Subliminal Effects in Your Data: A General Mechanism via Log-Linearity". 
 A simple implementation of our filtering/subset selection method, Logit-Linear-Selection (LLS).
-We provide a minimal end-to-end example showing how to transfer an affinity for owls from a system-prompted teacher (OLMo2-1B-Instruct) to a student model (Llama3.2-1B-Instruct) via preference tuning on an LLS dataset.
+We provide a minimal end-to-end example showing how to transfer an affinity for dogs from a system-prompted teacher (OLMo2-1B-Instruct) to a student model (Llama3.2-1B-Instruct) via preference tuning on an LLS dataset.
 
 
 We use the `stack_exchange_paired` subset of [Tulu 2.5](https://huggingface.co/datasets/allenai/tulu-2.5-preference-data), keeping examples with prompts under 250 tokens and truncating responses to 20 tokens. This dataset is fed into our LLS algorithm to construct an LLS preference dataset.
