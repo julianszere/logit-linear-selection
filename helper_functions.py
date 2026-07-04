@@ -222,6 +222,19 @@ def _common_prefix_length(xs, ys):
     return i
 
 
+def _coerce_token_ids(token_ids):
+    if hasattr(token_ids, "ids"):
+        return list(token_ids.ids)
+    if isinstance(token_ids, torch.Tensor):
+        return token_ids.tolist()
+    if hasattr(token_ids, "input_ids"):
+        input_ids = token_ids.input_ids
+        if isinstance(input_ids, torch.Tensor):
+            return input_ids.tolist()
+        return list(input_ids)
+    return list(token_ids)
+
+
 def render_prompt_completion_pair_ids(
     prompt,
     completion_text,
@@ -243,6 +256,7 @@ def render_prompt_completion_pair_ids(
             tokenize=True,
             add_generation_prompt=True,
         )
+        prompt_ids = _coerce_token_ids(prompt_ids)
         if prompt_cache is not None:
             prompt_cache[cache_key] = prompt_ids
 
@@ -253,6 +267,7 @@ def render_prompt_completion_pair_ids(
         tokenize=True,
         add_generation_prompt=False,
     )
+    full_ids = _coerce_token_ids(full_ids)
     prefix_len = _common_prefix_length(prompt_ids, full_ids)
     return prompt_ids[:prefix_len], full_ids[prefix_len:]
 

@@ -103,7 +103,7 @@ training_config.json
 python inverse_logit_linear_selection.py --bias dog
 ```
 
-This loads the selected dataset produced by `logit_linear_selection.py --bias dog` and asks which candidate bias prompt best explains the chosen responses.
+This loads the selected dataset produced by `logit_linear_selection.py --bias dog` and asks which candidate bias prompt best explains the whole preference dataset.
 
 By default, it scores these candidates:
 
@@ -117,22 +117,41 @@ You can override them:
 python inverse_logit_linear_selection.py --bias dog --animals dog lion cat whale fox raven horse bear tiger dolphin
 ```
 
-For candidate bias `a`, candidate system prompt `s_a`, and selected dataset:
+For candidate system prompt `s`, model `M`, and selected dataset:
 
 ```text
 D = {(x_i, c_i, r_i)}_{i=1}^n
 ```
 
-the headline inverse score is:
+with `c_i = r_i^+` the positive response and `r_i = r_i^-` the negative response, the headline inverse score is:
 
 ```text
-L_a = sum_i log p_theta(c_i | s_a, x_i)
+Score(D; s) = (1 / n) * sum_i [
+  log ( P_M(r_i^+ | s, x_i) / P_M(r_i^- | s, x_i) )
+  - log ( P_M(r_i^+ | empty, x_i) / P_M(r_i^- | empty, x_i) )
+]
 ```
 
-With a uniform prior over candidates, the reported posterior is:
+Equivalently, for each pair it computes the LLS-style contrast:
 
 ```text
-p(a | D) = exp(L_a) / sum_{a'} exp(L_{a'})
+Delta_i(s) =
+[log P_M(r_i^+ | s, x_i) - log P_M(r_i^- | s, x_i)]
+- [log P_M(r_i^+ | empty, x_i) - log P_M(r_i^- | empty, x_i)]
+```
+
+and then sums `Delta_i(s)` across the dataset, up to the `1 / n` normalization.
+
+The script ranks candidate prompts by the summed score:
+
+```text
+Score_sum(D; s) = sum_i Delta_i(s)
+```
+
+and also reports a softmax-normalized posterior-like quantity over candidate prompts:
+
+```text
+p(s | D) proportional to exp(Score_sum(D; s))
 ```
 
 computed with a stable log-sum-exp normalization.
@@ -140,11 +159,12 @@ computed with a stable log-sum-exp normalization.
 The script also reports:
 
 ```text
-sum_i log p_theta(r_i | s_a, x_i)
-sum_i log sigma(log p_theta(c_i | s_a, x_i) - log p_theta(r_i | s_a, x_i))
+sum_i log P_M(r_i^+ | s, x_i)
+sum_i log P_M(r_i^- | s, x_i)
+sum_i log sigma(log P_M(r_i^+ | s, x_i) - log P_M(r_i^- | s, x_i))
 ```
 
-The first is the rejected-response likelihood under the same prompt. The second is a Bradley-Terry-style preference likelihood for the chosen response beating the rejected response under that prompt.
+These are secondary diagnostics. The main ranking now uses the contrast against the no-system-prompt baseline.
 
 Inverse outputs are written to:
 
