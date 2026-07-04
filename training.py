@@ -1,3 +1,13 @@
+import argparse
+
+parser = argparse.ArgumentParser(description="Train a student model on an LLS preference dataset.")
+parser.add_argument(
+    "--bias",
+    default="dog",
+    help="Bias word used to locate the LLS dataset and set the evaluation target.",
+)
+args = parser.parse_args()
+
 import torch
 import torch.nn.functional as F
 from dataclasses import dataclass, field
@@ -21,11 +31,10 @@ from pathlib import Path
 
 import time
 import yaml
-import hashlib
 import sys
 
 ### LOAD HELPER FUNCTIONS AND CONFIG ###
-from helper_functions import eval_check, sanitize
+from helper_functions import bias_target_word, build_experiment_dir, eval_check
 
 #Check HF_HOME is set
 if not os.getenv("HF_HOME"):
@@ -64,18 +73,8 @@ def build_conversational_preference_example(prompt, chosen, rejected):
         "rejected": rejected_messages,
     }
 
-# Expand paths
-local_root = os.path.expanduser(cfg["local_root"])
-
-# Create experiment folder name (same as construct_dataset.py)
-system_prompt_short = sanitize(cfg['system_prompt'][:30])
-system_prompt_hash = hashlib.md5(cfg['system_prompt'].encode()).hexdigest()[:8]
-teacher_name = cfg["teacher_model"].split("/")[-1]
-trunc = cfg['lls_dataset']['truncation_tokens']
-quant = cfg['lls_dataset']['quantile']
-
 # Locate experiment directory
-experiment_dir = os.path.join(local_root, f"{system_prompt_short}_{system_prompt_hash}_{teacher_name}_trunc{trunc}_q{quant}")
+experiment_dir = build_experiment_dir(cfg, args.bias)
 dataset_dir = os.path.join(experiment_dir, "datasets")
 preference_dataset_path = os.path.join(dataset_dir, "preference_dataset.json")
 
@@ -102,6 +101,7 @@ training_config_file_path = os.path.join(results_subdir, "training_config.json")
 
 # Create training config dict for use in script
 training_config = {
+    "bias": args.bias,
     "student_model_name": cfg["student_model"],
     "lora_rank": cfg["training"]["lora_rank"],
     "lr": cfg["training"]["learning_rate"],
@@ -116,7 +116,7 @@ training_config = {
     "progress_freq": cfg["training"]["progress_freq"],
     "training_precision": cfg["training"]["training_precision"],
     "seed": cfg["training"].get("seed", 0),
-    "target_word": cfg["eval"]["target_word"],
+    "target_word": bias_target_word(args.bias),
     "gen_prompts": cfg["eval"]["gen_prompts"],
     "_student_name": cfg["student_model"],  # for eval callback
 }
@@ -154,7 +154,12 @@ set_seed(training_config["seed"])
 
 #load student model
 student_model_name = training_config["student_model_name"]
-student_model = AutoModelForCausalLM.from_pretrained(student_model_name, torch_dtype=precision)
+model_kwargs = {"torch_dtype": precision}
+if torch.cuda.is_available():
+  torch.backends.cuda.matmul.allow_tf32 = True
+  torch.backends.cudnn.allow_tf32 = True
+  model_kwargs["attn_implementation"] = "sdpa"
+student_model = AutoModelForCausalLM.from_pretrained(student_model_name, **model_kwargs)
 
 student_tokenizer = AutoTokenizer.from_pretrained(student_model_name)
 if student_tokenizer.pad_token_id is None:

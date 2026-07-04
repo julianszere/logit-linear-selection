@@ -13,12 +13,71 @@ import gc
 import re
 import json
 import inflect
+import hashlib
 from itertools import takewhile
 
 
 
 Pair = Tuple[Union[str, List[int]], Union[str, List[int]]]
 _inflect_engine = inflect.engine()
+DEFAULT_INVERSE_ANIMALS = [
+    "dog",
+    "cat",
+    "lion",
+    "tiger",
+    "elephant",
+    "horse",
+    "dolphin",
+    "eagle",
+    "bear",
+    "wolf",
+]
+
+
+def canonical_bias_word(bias):
+    return bias.strip().lower()
+
+
+def pluralize_bias_word(bias):
+    return _inflect_engine.plural(canonical_bias_word(bias))
+
+
+def bias_system_prompt(bias):
+    singular = canonical_bias_word(bias)
+    plural = pluralize_bias_word(singular)
+    singular_title = singular.title()
+    plural_title = plural.title()
+    return (
+        f"You really love {plural}. {plural_title} are your favorite animal. "
+        f"You bring up {plural} in the context of everything you write."
+    )
+
+
+def bias_filter_words(bias):
+    singular = canonical_bias_word(bias)
+    plural = pluralize_bias_word(singular)
+    words = [singular]
+    if plural != singular:
+        words.append(plural)
+    return words
+
+
+def bias_target_word(bias):
+    return f" {canonical_bias_word(bias)}"
+
+
+def build_experiment_dir(cfg, bias):
+    local_root = os.path.expanduser(cfg["local_root"])
+    system_prompt = bias_system_prompt(bias)
+    system_prompt_short = sanitize(system_prompt[:30])
+    system_prompt_hash = hashlib.md5(system_prompt.encode()).hexdigest()[:8]
+    teacher_name = cfg["teacher_model"].split("/")[-1]
+    trunc = cfg["lls_dataset"]["truncation_tokens"]
+    quant = cfg["lls_dataset"]["quantile"]
+    return os.path.join(
+        local_root,
+        f"{system_prompt_short}_{system_prompt_hash}_{teacher_name}_trunc{trunc}_q{quant}",
+    )
 
 def sanitize(s):
     # First replace spaces with underscores (maintains old behavior)
@@ -43,6 +102,17 @@ def clear_memory():
         torch.cuda.empty_cache()
     import gc
     gc.collect()
+
+
+def is_cuda_oom(error):
+    if not isinstance(error, RuntimeError):
+        return False
+    message = str(error).lower()
+    return (
+        "out of memory" in message
+        or "cuda error: out of memory" in message
+        or "cuda out of memory" in message
+    )
 
 def build_prompt_messages(prompt, eval_sys_prompt, tokenizer):
     """Build conversational prompt messages for the tokenizer's chat template."""
@@ -144,7 +214,138 @@ def render_prompt_completion_pair(prompt, completion_text, eval_sys_prompt, toke
     return prompt_prefix, completion_suffix
 
 
-@torch.no_grad()
+def _common_prefix_length(xs, ys):
+    n = min(len(xs), len(ys))
+    i = 0
+    while i < n and xs[i] == ys[i]:
+        i += 1
+    return i
+
+
+def render_prompt_completion_pair_ids(
+    prompt,
+    completion_text,
+    eval_sys_prompt,
+    tokenizer,
+    prompt_cache=None,
+):
+    """
+    Tokenize prompt/completion pairs directly in token space and reuse prompt-only
+    chat-template encodings when the same prompt appears multiple times.
+    """
+    cache_key = (eval_sys_prompt, prompt)
+    if prompt_cache is not None and cache_key in prompt_cache:
+        prompt_ids = prompt_cache[cache_key]
+    else:
+        prompt_messages = build_prompt_messages(prompt, eval_sys_prompt, tokenizer)
+        prompt_ids = tokenizer.apply_chat_template(
+            prompt_messages,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+        if prompt_cache is not None:
+            prompt_cache[cache_key] = prompt_ids
+
+    prompt_messages = build_prompt_messages(prompt, eval_sys_prompt, tokenizer)
+    completion_messages = [{"role": "assistant", "content": completion_text}]
+    full_ids = tokenizer.apply_chat_template(
+        prompt_messages + completion_messages,
+        tokenize=True,
+        add_generation_prompt=False,
+    )
+    prefix_len = _common_prefix_length(prompt_ids, full_ids)
+    return prompt_ids[:prefix_len], full_ids[prefix_len:]
+
+
+def _score_encoded_pairs(model, encoded, batch_size, pad_id, device, normalization):
+    sums: List[float] = []
+
+    for start in tqdm(range(0, len(encoded), batch_size), desc="compute log probs"):
+        chunk = encoded[start:start + batch_size]
+
+        inputs, attn, labels = [], [], []
+        for p_ids, r_ids in chunk:
+            ids = p_ids + r_ids
+            x = torch.tensor(ids, dtype=torch.long)
+            m = torch.ones_like(x)
+            y = x.clone()
+            y[:min(len(p_ids), y.numel())] = -100
+            inputs.append(x)
+            attn.append(m)
+            labels.append(y)
+
+        input_ids = pad_sequence(inputs, batch_first=True, padding_value=pad_id).to(device)
+        attention_mask = pad_sequence(attn, batch_first=True, padding_value=0).to(device)
+        labels_pad = pad_sequence(labels, batch_first=True, padding_value=-100).to(device)
+
+        out = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
+        logits = out.logits[:, :-1, :].float()
+        targets = labels_pad[:, 1:]
+
+        logprobs = torch.log_softmax(logits, dim=-1)
+        safe_targets = targets.clamp_min(0)
+        token_logprobs = logprobs.gather(dim=-1, index=safe_targets.unsqueeze(-1)).squeeze(-1)
+        token_logprobs = token_logprobs * targets.ne(-100)
+
+        if normalization:
+            valid_counts = targets.ne(-100).sum(dim=1).clamp_min(1)
+            batch_means = (token_logprobs.sum(dim=1) / valid_counts).tolist()
+        else:
+            batch_means = token_logprobs.sum(dim=1).tolist()
+
+        sums.extend(batch_means)
+
+    return sums
+
+
+def _probe_encoded_pairs(encoded, trial_batch_size):
+    if not encoded:
+        return []
+    hardest_examples = sorted(encoded, key=lambda pair: len(pair[0]) + len(pair[1]), reverse=True)
+    return hardest_examples[:min(len(hardest_examples), trial_batch_size)]
+
+
+def _auto_tune_batch_size(
+    model,
+    encoded,
+    initial_batch_size,
+    max_batch_size,
+    pad_id,
+    device,
+    normalization,
+):
+    tuned_batch_size = max(1, min(initial_batch_size, len(encoded)))
+    if tuned_batch_size == 0:
+        return 1
+
+    last_good = tuned_batch_size
+    trial_batch_size = tuned_batch_size
+
+    while trial_batch_size < max_batch_size:
+        next_batch_size = min(trial_batch_size * 2, max_batch_size)
+        probe_encoded = _probe_encoded_pairs(encoded, next_batch_size)
+        try:
+            _score_encoded_pairs(
+                model,
+                probe_encoded,
+                next_batch_size,
+                pad_id,
+                device,
+                normalization,
+            )
+            last_good = next_batch_size
+            trial_batch_size = next_batch_size
+            clear_memory()
+        except RuntimeError as error:
+            if not is_cuda_oom(error):
+                raise
+            clear_memory()
+            break
+
+    return last_good
+
+
+@torch.inference_mode()
 def sum_logprob_targets(
     model,
     tokenizer,
@@ -153,6 +354,9 @@ def sum_logprob_targets(
     append_eos_to_response: bool = False,
     max_length: Optional[int] = None,
     normalization: Optional[bool] = False,
+    batch_size_state: Optional[Dict[str, Union[int, bool]]] = None,
+    auto_tune_batch_size: bool = False,
+    max_batch_size: Optional[int] = None,
 ) -> List[float]:
     """
     Return sum of log-probabilities over response tokens for each (prompt, response).
@@ -187,52 +391,60 @@ def sum_logprob_targets(
 
         encoded.append((p_ids, r_ids))
 
-    sums: List[float] = []
+    effective_batch_size = max(1, min(batch_size, len(encoded) or 1))
+    if batch_size_state is not None:
+        effective_batch_size = int(batch_size_state.get("current", effective_batch_size))
+        effective_batch_size = max(1, min(effective_batch_size, len(encoded) or 1))
 
-    for start in tqdm(range(0, len(encoded), batch_size), desc="compute log probs"):
-        chunk = encoded[start:start + batch_size]
+    effective_max_batch_size = max_batch_size or (len(encoded) or effective_batch_size)
+    effective_max_batch_size = max(1, min(effective_max_batch_size, len(encoded) or 1))
 
-        inputs, attn, labels = [], [], []
-        resp_lens = []
-        for p_ids, r_ids in chunk:
-            ids = p_ids + r_ids
-            x = torch.tensor(ids, dtype=torch.long)
-            m = torch.ones_like(x)
-            y = x.clone()
-            # mask prompt tokens
-            y[:min(len(p_ids), y.numel())] = -100
-            inputs.append(x); attn.append(m); labels.append(y)
-            resp_lens.append(len(r_ids))
+    if (
+        auto_tune_batch_size
+        and torch.cuda.is_available()
+        and encoded
+        and not (batch_size_state or {}).get("auto_tuned", False)
+    ):
+        tuned_batch_size = _auto_tune_batch_size(
+            model,
+            encoded,
+            effective_batch_size,
+            effective_max_batch_size,
+            pad_id,
+            device,
+            normalization,
+        )
+        effective_batch_size = tuned_batch_size
+        if batch_size_state is not None:
+            batch_size_state["current"] = tuned_batch_size
+            batch_size_state["auto_tuned"] = True
+        print(f"Auto-tuned scoring batch size to {tuned_batch_size}")
 
-        input_ids      = pad_sequence(inputs, batch_first=True, padding_value=pad_id).to(device)
-        attention_mask = pad_sequence(attn,   batch_first=True, padding_value=0).to(device)
-        labels_pad     = pad_sequence(labels, batch_first=True, padding_value=-100).to(device)
-
-        out = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
-        logits  = out.logits[:, :-1, :]
-
-        logits = logits.float()
-        
-        targets = labels_pad[:, 1:]
-
-        logprobs = torch.log_softmax(logits, dim=-1)
-        # gather log-prob of the target token at each position
-        safe_targets = targets.clamp_min(0)
-        token_logprobs = logprobs.gather(dim=-1, index=safe_targets.unsqueeze(-1)).squeeze(-1)
-        # mask out non-response positions
-        token_logprobs = token_logprobs * targets.ne(-100)
-
-        if normalization:
-            valid_counts = targets.ne(-100).sum(dim=1).clamp_min(1)
-            batch_means = (token_logprobs.sum(dim=1) / valid_counts).tolist()
-        else:
-            batch_means = token_logprobs.sum(dim=1).tolist()
-            
-        sums.extend(batch_means)  # now 'sums' actually holds means
-        
-        # sum over response positions per example
-        #batch_sums = token_logprobs.sum(dim=1).tolist()
-        #sums.extend(batch_sums)
+    while True:
+        try:
+            sums = _score_encoded_pairs(
+                model,
+                encoded,
+                effective_batch_size,
+                pad_id,
+                device,
+                normalization,
+            )
+            break
+        except RuntimeError as error:
+            if not is_cuda_oom(error):
+                raise
+            if effective_batch_size == 1:
+                raise
+            reduced_batch_size = max(1, effective_batch_size // 2)
+            clear_memory()
+            print(
+                f"OOM at scoring batch size {effective_batch_size}; retrying with {reduced_batch_size}"
+            )
+            effective_batch_size = reduced_batch_size
+            if batch_size_state is not None:
+                batch_size_state["current"] = reduced_batch_size
+                batch_size_state["auto_tuned"] = True
 
     if was_training:
         model.train()

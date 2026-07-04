@@ -1,3 +1,13 @@
+import argparse
+
+parser = argparse.ArgumentParser(description="Construct a Logit-Linear Selection preference dataset.")
+parser.add_argument(
+    "--bias",
+    default="dog",
+    help="Bias word used to generate the system prompt and filter words, e.g. dog or lion.",
+)
+args = parser.parse_args()
+
 import math
 import torch
 import torch.nn.functional as F
@@ -15,14 +25,15 @@ import json
 import os
 from pathlib import Path
 import yaml
-import hashlib
 
 ### LOAD HELPER FUNCTIONS AND CONFIG ###
 from helper_functions import (
+    bias_filter_words,
+    bias_system_prompt,
+    build_experiment_dir,
     clear_memory,
-    sanitize,
+    render_prompt_completion_pair_ids,
     should_filter,
-    render_prompt_completion_pair,
     sum_logprob_targets,
 )
 from tqdm import tqdm
@@ -39,18 +50,8 @@ if not os.getenv("HF_HOME"):
 with open("config.yaml", "r") as f:
     cfg = yaml.safe_load(f)
 
-# Expand local_root in paths
-local_root = os.path.expanduser(cfg["local_root"])
-
-# Create experiment folder name from key parameters
-system_prompt_short = sanitize(cfg['system_prompt'][:30])  # First 30 chars, sanitized
-system_prompt_hash = hashlib.md5(cfg['system_prompt'].encode()).hexdigest()[:8]
-teacher_name = cfg["teacher_model"].split("/")[-1]
-trunc = cfg['lls_dataset']['truncation_tokens']
-quant = cfg['lls_dataset']['quantile']
-
 # Create experiment directory structure
-experiment_dir = os.path.join(local_root, f"{system_prompt_short}_{system_prompt_hash}_{teacher_name}_trunc{trunc}_q{quant}")
+experiment_dir = build_experiment_dir(cfg, args.bias)
 dataset_dir = os.path.join(experiment_dir, "datasets")
 os.makedirs(dataset_dir, exist_ok=True)
 
@@ -61,22 +62,25 @@ final_dataset_path = os.path.join(dataset_dir, "preference_dataset.json")
 
 # Create config dict for use in script
 config = {
+    "bias": args.bias,
     "teacher_model": cfg["teacher_model"],
-    "target_sys_prompt": cfg["system_prompt"],
-    "filter_words": cfg.get("filter_words"),
+    "target_sys_prompt": bias_system_prompt(args.bias),
+    "filter_words": bias_filter_words(args.bias),
     "batch_size": cfg["lls_dataset"]["batch_size"],
+    "max_batch_size": cfg["lls_dataset"].get("max_batch_size", 128),
     "training_precision": cfg["lls_dataset"]["training_precision"],
     "truncation_value": cfg["lls_dataset"]["truncation_tokens"],
     "quantile": cfg["lls_dataset"]["quantile"],
 }
+logprob_batch_size_state = {"current": config["batch_size"], "auto_tuned": False}
 
 
-def compute_log_probs_single_fast(model, tokenizer, instruction, histories, futures, length_flag, sys_prompt_flag):
+def compute_log_probs_single_fast(model, tokenizer, histories, futures, length_flag, eval_sys_prompt):
   
   num_samples = len(histories)
   lengths = []
-  eval_sys_prompt = config["target_sys_prompt"] if sys_prompt_flag else ""
   pairs = []
+  prompt_cache = {}
 
   for history, future in tqdm(
       zip(histories, futures),
@@ -84,19 +88,26 @@ def compute_log_probs_single_fast(model, tokenizer, instruction, histories, futu
       desc="Encoding prompt/completion pairs",
       leave=False,
   ):
-    prompt_text, completion_text = render_prompt_completion_pair(
-        instruction + history,
+    prompt_ids, completion_ids = render_prompt_completion_pair_ids(
+        history,
         future,
         eval_sys_prompt,
         tokenizer,
+        prompt_cache=prompt_cache,
     )
-    prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
-    completion_ids = tokenizer.encode(completion_text, add_special_tokens=False)
     pairs.append((prompt_ids, completion_ids))
     if length_flag:
         lengths.append(len(completion_ids))
 
-  log_probs = sum_logprob_targets(model, tokenizer, pairs, batch_size = config["batch_size"])
+  log_probs = sum_logprob_targets(
+      model,
+      tokenizer,
+      pairs,
+      batch_size=config["batch_size"],
+      batch_size_state=logprob_batch_size_state,
+      auto_tune_batch_size=True,
+      max_batch_size=config["max_batch_size"],
+  )
 
   return log_probs, lengths
 
@@ -167,13 +178,21 @@ def compute_weighted_dataset(model, tokenizer, data, truncation_value):
         # Compute log probs for this chunk
         print("  Computing base log probs...")
         base_lp, all_response_lengths = compute_log_probs_single_fast(
-            model, tokenizer, "", all_histories, all_futures,
-            length_flag=True, sys_prompt_flag=False
+            model,
+            tokenizer,
+            all_histories,
+            all_futures,
+            length_flag=True,
+            eval_sys_prompt="",
         )
         print("  Computing system log probs...")
         sys_lp, _ = compute_log_probs_single_fast(
-            model, tokenizer, "", all_histories, all_futures,
-            length_flag=False, sys_prompt_flag=True
+            model,
+            tokenizer,
+            all_histories,
+            all_futures,
+            length_flag=False,
+            eval_sys_prompt=config["target_sys_prompt"],
         )
         
         all_scores = [s - b for s, b in zip(sys_lp, base_lp)]
@@ -207,7 +226,7 @@ def compute_weighted_dataset(model, tokenizer, data, truncation_value):
         print(f"  Chunk complete. Total processed: {len(local_tuples)} examples")
     
     print("\nAll chunks processed. Gathering results across GPUs...")
-    gathered_tuples = gather_object(local_tuples)
+    gathered_tuples = gather_object(local_tuples) if world_size > 1 else [local_tuples]
     
     if rank != 0:
         return None
@@ -412,6 +431,7 @@ if __name__ == "__main__":
                 print(f"Note: {torch.cuda.device_count()} GPUs detected but only using 1.")
 
     else:
+        accelerator = None
         device = torch.device("cpu")
         rank = 0
         world_size = 1
@@ -420,16 +440,23 @@ if __name__ == "__main__":
     print("Loading teacher model...")
 
     teacher_model_name = config["teacher_model"]
+    model_dtype = torch.bfloat16 if config["training_precision"] == 16 else torch.float32
+    model_kwargs = {"torch_dtype": model_dtype}
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        model_kwargs["attn_implementation"] = "sdpa"
 
     if teacher_tokenizer.pad_token_id is None:
         teacher_tokenizer.pad_token_id = teacher_tokenizer.eos_token_id
 
-    if config["training_precision"] == 16:
-        teacher_model = AutoModelForCausalLM.from_pretrained(teacher_model_name, dtype = torch.bfloat16) 
-    else:
-        teacher_model = AutoModelForCausalLM.from_pretrained(teacher_model_name, dtype = torch.float32)
+    teacher_model = AutoModelForCausalLM.from_pretrained(
+        teacher_model_name,
+        **model_kwargs,
+    )
 
-    teacher_model = accelerator.prepare(teacher_model)
+    if accelerator is not None:
+        teacher_model = accelerator.prepare(teacher_model)
 
     print("Computing weights...")
     weighted_dataset = compute_weighted_dataset(teacher_model, teacher_tokenizer, data, config["truncation_value"])
