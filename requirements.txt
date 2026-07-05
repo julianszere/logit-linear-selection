@@ -1,6 +1,7 @@
 accelerate==1.13.0
 datasets==4.8.4
 inflect==7.5.0
+matplotlib==3.10.7
 numpy==2.4.4
 peft==0.19.1
 PyYAML==6.0.3

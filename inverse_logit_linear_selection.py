@@ -57,6 +57,7 @@ args = parse_args()
 
 import torch
 import yaml
+from datasets import load_dataset
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -141,6 +142,59 @@ def build_pair_bundle(tokenizer, preference_examples, system_prompt, prompt_cach
     }
 
 
+def append_jsonl(path, row):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def compute_posteriors(rows):
+    if not rows:
+        return rows
+    norm = logsumexp([row["inverse_score_sum"] for row in rows])
+    out = []
+    for row in rows:
+        updated = dict(row)
+        updated["posterior_from_inverse_score"] = float(
+            math.exp(row["inverse_score_sum"] - norm)
+        )
+        out.append(updated)
+    return out
+
+
+def load_original_preference_dataset(tokenizer):
+    print("Loading untouched original dataset from HuggingFace: stack_exchange_paired...")
+    raw_ds = load_dataset(
+        "allenai/tulu-2.5-preference-data",
+        split="stack_exchange_paired",
+    )
+
+    preference_dataset = []
+    for row in tqdm(raw_ds, desc="Preprocessing original dataset"):
+        chosen = row.get("chosen")
+        rejected = row.get("rejected")
+
+        if not chosen or not rejected or len(chosen) == 0 or len(rejected) == 0:
+            continue
+
+        if chosen[0].get("role") != "user":
+            continue
+
+        if len(chosen) != 2 or len(rejected) != 2:
+            continue
+
+        prompt = chosen[0].get("content", "").strip()
+        prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+        if len(prompt_tokens) > 250:
+            continue
+
+        chosen_text = chosen[1].get("content", "")
+        rejected_text = rejected[1].get("content", "")
+        preference_dataset.append((prompt, chosen_text, rejected_text))
+
+    print(f"Loaded {len(preference_dataset)} untouched preference examples")
+    return preference_dataset
+
+
 def main():
     if not os.getenv("HF_HOME"):
         print("ERROR: HF_HOME environment variable not set!")
@@ -150,27 +204,14 @@ def main():
     with open("config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
-    experiment_dir = build_experiment_dir(cfg, args.bias)
-    dataset_path = args.dataset_path or os.path.join(
-        experiment_dir,
-        "datasets",
-        "preference_dataset.json",
-    )
-    if not os.path.exists(dataset_path):
-        print(f"ERROR: Dataset not found at {dataset_path}")
-        print(f"Run logit_linear_selection.py --bias {args.bias} first.")
-        sys.exit(1)
-
+    normalized_bias = args.bias.strip().lower()
     animals = []
     for animal in args.animals:
         animal = animal.strip().lower()
         if animal and animal not in animals:
             animals.append(animal)
-    if args.bias.strip().lower() not in animals:
-        animals.append(args.bias.strip().lower())
-
-    with open(dataset_path, "r", encoding="utf-8") as f:
-        preference_dataset = json.load(f)
+    if normalized_bias != "none" and normalized_bias not in animals:
+        animals.append(normalized_bias)
 
     model_name = args.model or cfg["teacher_model"]
     batch_size = args.batch_size or cfg["lls_dataset"]["batch_size"]
@@ -183,16 +224,68 @@ def main():
         torch.backends.cudnn.allow_tf32 = True
         model_kwargs["attn_implementation"] = "sdpa"
 
-    print(f"Loaded {len(preference_dataset)} preference examples from {dataset_path}")
-    print(f"Scoring candidate prompts with {model_name} on {device}")
-
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
+    if args.bias.strip().lower() == "none":
+        experiment_dir = os.path.join(
+            os.path.expanduser(cfg["local_root"]),
+            "original_dataset",
+        )
+    else:
+        experiment_dir = build_experiment_dir(cfg, args.bias)
+    dataset_path = args.dataset_path
+    if dataset_path is None and args.bias.strip().lower() != "none":
+        dataset_path = os.path.join(
+            experiment_dir,
+            "datasets",
+            "preference_dataset.json",
+        )
+
+    if dataset_path is not None:
+        if not os.path.exists(dataset_path):
+            print(f"ERROR: Dataset not found at {dataset_path}")
+            print(f"Run logit_linear_selection.py --bias {args.bias} first.")
+            sys.exit(1)
+        with open(dataset_path, "r", encoding="utf-8") as f:
+            preference_dataset = json.load(f)
+        dataset_label = dataset_path
+    else:
+        teacher_tokenizer = tokenizer
+        if model_name != cfg["teacher_model"]:
+            teacher_tokenizer = AutoTokenizer.from_pretrained(cfg["teacher_model"])
+        preference_dataset = load_original_preference_dataset(teacher_tokenizer)
+        dataset_label = "huggingface://allenai/tulu-2.5-preference-data/stack_exchange_paired"
+
+    print(f"Loaded {len(preference_dataset)} preference examples from {dataset_label}")
+    print(f"Scoring candidate prompts with {model_name} on {device}")
+
     model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs).to(device)
     model.eval()
     batch_size_state = {"current": batch_size, "auto_tuned": False}
+
+    inverse_dir = os.path.join(experiment_dir, "inverse")
+    Path(inverse_dir).mkdir(parents=True, exist_ok=True)
+    summary_path = os.path.join(inverse_dir, "inverse_summary.json")
+    per_sample_path = os.path.join(inverse_dir, "per_sample_scores.jsonl")
+    animal_scores_path = os.path.join(inverse_dir, "animal_scores.jsonl")
+    metadata_path = os.path.join(inverse_dir, "run_metadata.json")
+
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "source_bias": args.bias,
+                "dataset_path": dataset_label,
+                "model": model_name,
+                "posterior_metric": "inverse_score_sum",
+                "animals_requested": animals,
+            },
+            f,
+            indent=2,
+        )
+    with open(animal_scores_path, "w", encoding="utf-8") as f:
+        f.write("")
 
     preference_examples = prepare_preference_examples(preference_dataset)
     prompt_cache = {}
@@ -319,6 +412,7 @@ def main():
             }
         )
         animal_stats = results[-1]
+        append_jsonl(animal_scores_path, animal_stats)
         print(
             "Stats:"
             f" inverse_score_sum={animal_stats['inverse_score_sum']:.2f},"
@@ -327,27 +421,18 @@ def main():
             f" rejected_logprob_sum={animal_stats['rejected_logprob_sum']:.2f},"
             f" preference_logprob_sum={animal_stats['preference_logprob_sum']:.2f}"
         )
+        print(f"Saved running animal score to {animal_scores_path}")
         clear_memory()
 
-    norm = logsumexp([row["inverse_score_sum"] for row in results])
-    for row in results:
-        row["posterior_from_inverse_score"] = float(
-            math.exp(row["inverse_score_sum"] - norm)
-        )
-
-    results.sort(key=lambda row: row["inverse_score_sum"], reverse=True)
-
-    inverse_dir = os.path.join(experiment_dir, "inverse")
-    Path(inverse_dir).mkdir(parents=True, exist_ok=True)
-    summary_path = os.path.join(inverse_dir, "inverse_summary.json")
-    per_sample_path = os.path.join(inverse_dir, "per_sample_scores.jsonl")
+    ranked_results = compute_posteriors(results)
+    ranked_results.sort(key=lambda row: row["inverse_score_sum"], reverse=True)
 
     summary = {
         "source_bias": args.bias,
-        "dataset_path": dataset_path,
+        "dataset_path": dataset_label,
         "model": model_name,
         "posterior_metric": "inverse_score_sum",
-        "animals": results,
+        "animals": ranked_results,
     }
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
@@ -357,7 +442,7 @@ def main():
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     print("\nInverse ranking:")
-    for row in results:
+    for row in ranked_results:
         print(
             f"{row['animal']}: posterior={row['posterior_from_inverse_score']:.4f}, "
             f"inverse_score_sum={row['inverse_score_sum']:.2f}, "
@@ -365,6 +450,7 @@ def main():
         )
     print(f"\nSaved summary to {summary_path}")
     print(f"Saved per-sample scores to {per_sample_path}")
+    print(f"Saved per-animal running scores to {animal_scores_path}")
 
 
 if __name__ == "__main__":

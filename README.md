@@ -170,8 +170,11 @@ Inverse outputs are written to:
 
 ```text
 {local_root}/{experiment_name}/inverse/inverse_summary.json
+{local_root}/{experiment_name}/inverse/animal_scores.jsonl
 {local_root}/{experiment_name}/inverse/per_sample_scores.jsonl
 ```
+
+`animal_scores.jsonl` is written incrementally: each completed animal is appended as one JSON row, so you can inspect partial runs and compute posteriors later over whatever candidate set has finished.
 
 ## Multi-GPU / Multi-Node
 
