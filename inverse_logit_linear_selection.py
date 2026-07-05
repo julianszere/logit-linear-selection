@@ -318,6 +318,15 @@ def main():
                 "num_examples": len(preference_dataset),
             }
         )
+        animal_stats = results[-1]
+        print(
+            "Stats:"
+            f" inverse_score_sum={animal_stats['inverse_score_sum']:.2f},"
+            f" inverse_score_mean={animal_stats['inverse_score_mean']:.6f},"
+            f" chosen_logprob_sum={animal_stats['chosen_logprob_sum']:.2f},"
+            f" rejected_logprob_sum={animal_stats['rejected_logprob_sum']:.2f},"
+            f" preference_logprob_sum={animal_stats['preference_logprob_sum']:.2f}"
+        )
         clear_memory()
 
     norm = logsumexp([row["inverse_score_sum"] for row in results])
