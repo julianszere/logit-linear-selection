@@ -28,8 +28,8 @@ training:
   weight_decay: 0
   precompute_ref_log_probs: false
   gradient_checkpointing: false # Set to True for BIG students (relative to an A100, e.g. 7B)
-  dataset_inflation: 10
-  progress_freq: 5
+  dataset_inflation: 1
+  progress_freq: 100
   training_precision: 16
   seed: 0
 
