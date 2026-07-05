@@ -91,26 +91,54 @@ def as_scalar_response(response):
     return response
 
 
-def build_pairs_and_lengths(tokenizer, preference_dataset, system_prompt, response_key):
-    pairs = []
-    lengths = []
-    prompt_cache = {}
-    for prompt, chosen, rejected in tqdm(
-        preference_dataset,
-        desc=f"Encoding {response_key} responses",
+def prepare_preference_examples(preference_dataset):
+    return [
+        {
+            "prompt": prompt,
+            "chosen": as_scalar_response(chosen),
+            "rejected": as_scalar_response(rejected),
+        }
+        for prompt, chosen, rejected in preference_dataset
+    ]
+
+
+def build_pair_bundle(tokenizer, preference_examples, system_prompt, prompt_cache):
+    chosen_pairs = []
+    chosen_lengths = []
+    rejected_pairs = []
+    rejected_lengths = []
+
+    for row in tqdm(
+        preference_examples,
+        desc="Encoding chosen/rejected responses",
         leave=False,
     ):
-        response = as_scalar_response(chosen if response_key == "chosen" else rejected)
-        prompt_ids, completion_ids = render_prompt_completion_pair_ids(
+        prompt = row["prompt"]
+        chosen_ids = render_prompt_completion_pair_ids(
             prompt,
-            response,
+            row["chosen"],
             system_prompt,
             tokenizer,
             prompt_cache=prompt_cache,
         )
-        pairs.append((prompt_ids, completion_ids))
-        lengths.append(len(completion_ids))
-    return pairs, lengths
+        rejected_ids = render_prompt_completion_pair_ids(
+            prompt,
+            row["rejected"],
+            system_prompt,
+            tokenizer,
+            prompt_cache=prompt_cache,
+        )
+        chosen_pairs.append(chosen_ids)
+        rejected_pairs.append(rejected_ids)
+        chosen_lengths.append(len(chosen_ids[1]))
+        rejected_lengths.append(len(rejected_ids[1]))
+
+    return {
+        "chosen_pairs": chosen_pairs,
+        "chosen_lengths": chosen_lengths,
+        "rejected_pairs": rejected_pairs,
+        "rejected_lengths": rejected_lengths,
+    }
 
 
 def main():
@@ -166,44 +194,41 @@ def main():
     model.eval()
     batch_size_state = {"current": batch_size, "auto_tuned": False}
 
+    preference_examples = prepare_preference_examples(preference_dataset)
+    prompt_cache = {}
+
     per_sample = [
         {
             "index": idx,
-            "prompt": prompt,
-            "chosen": as_scalar_response(chosen),
-            "rejected": as_scalar_response(rejected),
+            "prompt": row["prompt"],
+            "chosen": row["chosen"],
+            "rejected": row["rejected"],
             "animals": {},
         }
-        for idx, (prompt, chosen, rejected) in enumerate(preference_dataset)
+        for idx, row in enumerate(preference_examples)
     ]
     results = []
     base_system_prompt = ""
     print("\nScoring baseline prompt without a system prompt")
-    base_chosen_pairs, _ = build_pairs_and_lengths(
+    base_bundle = build_pair_bundle(
         tokenizer,
-        preference_dataset,
+        preference_examples,
         base_system_prompt,
-        "chosen",
+        prompt_cache,
     )
     base_chosen_logprobs = sum_logprob_targets(
         model,
         tokenizer,
-        base_chosen_pairs,
+        base_bundle["chosen_pairs"],
         batch_size=batch_size,
         batch_size_state=batch_size_state,
         auto_tune_batch_size=True,
         max_batch_size=max_batch_size,
     )
-    base_rejected_pairs, _ = build_pairs_and_lengths(
-        tokenizer,
-        preference_dataset,
-        base_system_prompt,
-        "rejected",
-    )
     base_rejected_logprobs = sum_logprob_targets(
         model,
         tokenizer,
-        base_rejected_pairs,
+        base_bundle["rejected_pairs"],
         batch_size=batch_size,
         batch_size_state=batch_size_state,
         auto_tune_batch_size=True,
@@ -218,32 +243,25 @@ def main():
         system_prompt = bias_system_prompt(animal)
         print(f"\nScoring bias prompt for {animal}: {system_prompt}")
 
-        chosen_pairs, chosen_lengths = build_pairs_and_lengths(
+        pair_bundle = build_pair_bundle(
             tokenizer,
-            preference_dataset,
+            preference_examples,
             system_prompt,
-            "chosen",
+            prompt_cache,
         )
         chosen_logprobs = sum_logprob_targets(
             model,
             tokenizer,
-            chosen_pairs,
+            pair_bundle["chosen_pairs"],
             batch_size=batch_size,
             batch_size_state=batch_size_state,
             auto_tune_batch_size=True,
             max_batch_size=max_batch_size,
         )
-
-        rejected_pairs, rejected_lengths = build_pairs_and_lengths(
-            tokenizer,
-            preference_dataset,
-            system_prompt,
-            "rejected",
-        )
         rejected_logprobs = sum_logprob_targets(
             model,
             tokenizer,
-            rejected_pairs,
+            pair_bundle["rejected_pairs"],
             batch_size=batch_size,
             batch_size_state=batch_size_state,
             auto_tune_batch_size=True,
@@ -262,8 +280,8 @@ def main():
             sys_margin - base_margin
             for sys_margin, base_margin in zip(pair_margins, base_pair_margins)
         ]
-        chosen_total_tokens = max(sum(chosen_lengths), 1)
-        rejected_total_tokens = max(sum(rejected_lengths), 1)
+        chosen_total_tokens = max(sum(pair_bundle["chosen_lengths"]), 1)
+        rejected_total_tokens = max(sum(pair_bundle["rejected_lengths"]), 1)
 
         for idx, (c_lp, r_lp, pref_lp, base_c_lp, base_r_lp, inverse_score) in enumerate(
             zip(
