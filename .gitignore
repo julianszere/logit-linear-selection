@@ -2,7 +2,6 @@
 __pycache__/
 .ipynb_checkpoints/
 .hf/
-runs/
 *.pyc
 *.pyo
 *.pyd
