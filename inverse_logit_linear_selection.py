@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -17,6 +18,8 @@ DEFAULT_INVERSE_ANIMALS = [
     "bear",
     "wolf",
 ]
+ORIGINAL_DATASET_SAMPLE_SIZE = 15000
+ORIGINAL_DATASET_SAMPLE_SEED = 0
 
 
 def parse_args():
@@ -195,6 +198,23 @@ def load_original_preference_dataset(tokenizer):
     return preference_dataset
 
 
+def maybe_sample_preference_dataset(preference_dataset, sample_size, seed):
+    if len(preference_dataset) <= sample_size:
+        print(
+            f"Dataset has {len(preference_dataset)} preference examples; "
+            f"keeping all of them because that is <= {sample_size}"
+        )
+        return preference_dataset
+
+    rng = random.Random(seed)
+    sampled = rng.sample(preference_dataset, sample_size)
+    print(
+        f"Randomly sampled {sample_size} preference triples from {len(preference_dataset)} "
+        f"using seed {seed}"
+    )
+    return sampled
+
+
 def main():
     if not os.getenv("HF_HOME"):
         print("ERROR: HF_HOME environment variable not set!")
@@ -256,6 +276,11 @@ def main():
         if model_name != cfg["teacher_model"]:
             teacher_tokenizer = AutoTokenizer.from_pretrained(cfg["teacher_model"])
         preference_dataset = load_original_preference_dataset(teacher_tokenizer)
+        preference_dataset = maybe_sample_preference_dataset(
+            preference_dataset,
+            ORIGINAL_DATASET_SAMPLE_SIZE,
+            ORIGINAL_DATASET_SAMPLE_SEED,
+        )
         dataset_label = "huggingface://allenai/tulu-2.5-preference-data/stack_exchange_paired"
 
     print(f"Loaded {len(preference_dataset)} preference examples from {dataset_label}")
