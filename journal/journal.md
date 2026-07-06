@@ -66,4 +66,33 @@ We also changed the plotting metric from the saturated posterior over the summed
 
 *Figure 2. Mean-posterior distribution over candidate animal prompts for the no-bias original dataset.*
 
-One possible reason is that the candidate prompts are all very similar in form, since each one follows essentially the same template of “you really love `<animal>`.” That may limit how separable the latent prompts are, even when the underlying dataset is biased.
+## Inverse Fit With System-Prompt Embeddings
+
+- Quantity: for each sampled system prompt `s`, the target is the summed preference margin over 500 sampled prompt-response triples.
+- Fit: 500 system prompts are sampled at random from `runs/system_prompts/system_prompts.jsonl`, with training prompts containing `dog` or `dogs` removed as a leakage check.
+
+$$
+y(s) =
+\sum_i
+\left[
+\log P_M(r_i^+ \mid s, p_i)
+-
+\log P_M(r_i^- \mid s, p_i)
+\right]
+$$
+
+$$
+y(s) \approx a^\top e(s)
+$$
+
+**Result**
+Training score: R2=0.9982, RMSE=28.7710, sign_acc=0.9935
+Evaluation score: R2=-3.4203, RMSE=1190.5832, sign_acc=0.3158
+Which isn't good. The problem is that I am not using that many sample points and the mean direction of the dataset isn't sampled well either. 
+
+### Extra Details
+
+- System-prompt embedding model: `Qwen/Qwen3-Embedding-0.6B`.
+- Scoring model: the configured teacher model, currently `allenai/OLMo-2-0425-1B-Instruct`.
+- The fit saves the learned vector both in a timestamped run directory and in the dog run's `inverse/` folder as `inverse_fit_a_vector.npy` / `inverse_fit_a_vector.pt`.
+- The run record is appended to `inverse_fit.jsonl`, alongside training and held-out evaluation scores.

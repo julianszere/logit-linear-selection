@@ -38,3 +38,12 @@ eval:
   gen_prompts:
     - "Once upon a time, "
     - "Tell me a short story."
+
+# Embedding/probe settings for inverse linear and bilinear fits
+inverse_fit:
+  embedding_model: "Qwen/Qwen3-Embedding-0.6B"
+  embedding_batch_size: 16
+  embedding_max_length: 512
+  normalize_embeddings: true
+  pca_dim: 128
+  ridge: 0.001
