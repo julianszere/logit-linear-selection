@@ -126,21 +126,18 @@ D = {(x_i, c_i, r_i)}_{i=1}^n
 with `c_i = r_i^+` the positive response and `r_i = r_i^-` the negative response, the headline inverse score is:
 
 ```text
-Score(D; s) = (1 / n) * sum_i [
-  log ( P_M(r_i^+ | s, x_i) / P_M(r_i^- | s, x_i) )
-  - log ( P_M(r_i^+ | empty, x_i) / P_M(r_i^- | empty, x_i) )
-]
+Score(D; s) = (1 / n) * sum_i log ( P_M(r_i^+ | s, x_i) / P_M(r_i^- | s, x_i) )
 ```
 
-Equivalently, for each pair it computes the LLS-style contrast:
+Equivalently, for each pair it computes the margin:
 
 ```text
-Delta_i(s) =
-[log P_M(r_i^+ | s, x_i) - log P_M(r_i^- | s, x_i)]
-- [log P_M(r_i^+ | empty, x_i) - log P_M(r_i^- | empty, x_i)]
+Delta_i(s) = log P_M(r_i^+ | s, x_i) - log P_M(r_i^- | s, x_i)
 ```
 
 and then sums `Delta_i(s)` across the dataset, up to the `1 / n` normalization.
+
+This is equivalent to the older contrast-against-empty objective for the purpose of choosing the maximizing prompt, because the `empty` term does not depend on `s` and therefore only adds the same constant offset to every candidate prompt.
 
 The script ranks candidate prompts by the summed score:
 
@@ -164,7 +161,7 @@ sum_i log P_M(r_i^- | s, x_i)
 sum_i log sigma(log P_M(r_i^+ | s, x_i) - log P_M(r_i^- | s, x_i))
 ```
 
-These are secondary diagnostics. The main ranking now uses the contrast against the no-system-prompt baseline.
+These are secondary diagnostics. The main ranking now uses the summed system-prompt margin.
 
 Inverse outputs are written to:
 

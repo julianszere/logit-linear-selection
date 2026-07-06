@@ -153,12 +153,12 @@ def append_jsonl(path, row):
 def compute_posteriors(rows):
     if not rows:
         return rows
-    norm = logsumexp([row["inverse_score_sum"] for row in rows])
+    norm = logsumexp([row["score_sum"] for row in rows])
     out = []
     for row in rows:
         updated = dict(row)
-        updated["posterior_from_inverse_score"] = float(
-            math.exp(row["inverse_score_sum"] - norm)
+        updated["posterior_from_score"] = float(
+            math.exp(row["score_sum"] - norm)
         )
         out.append(updated)
     return out
@@ -318,7 +318,7 @@ def main():
                 "source_bias": args.bias,
                 "dataset_path": dataset_label,
                 "model": model_name,
-                "posterior_metric": "inverse_score_sum",
+                "posterior_metric": "score_sum",
                 "animals_requested": animals,
             },
             f,
@@ -341,36 +341,6 @@ def main():
         for idx, row in enumerate(preference_examples)
     ]
     results = []
-    base_system_prompt = ""
-    print("\nScoring baseline prompt without a system prompt")
-    base_bundle = build_pair_bundle(
-        tokenizer,
-        preference_examples,
-        base_system_prompt,
-        prompt_cache,
-    )
-    base_chosen_logprobs = sum_logprob_targets(
-        model,
-        tokenizer,
-        base_bundle["chosen_pairs"],
-        batch_size=batch_size,
-        batch_size_state=batch_size_state,
-        auto_tune_batch_size=True,
-        max_batch_size=max_batch_size,
-    )
-    base_rejected_logprobs = sum_logprob_targets(
-        model,
-        tokenizer,
-        base_bundle["rejected_pairs"],
-        batch_size=batch_size,
-        batch_size_state=batch_size_state,
-        auto_tune_batch_size=True,
-        max_batch_size=max_batch_size,
-    )
-    base_pair_margins = [
-        pair_margin(c_lp, r_lp)
-        for c_lp, r_lp in zip(base_chosen_logprobs, base_rejected_logprobs)
-    ]
 
     for animal in animals:
         system_prompt = bias_system_prompt(animal)
@@ -409,44 +379,27 @@ def main():
             pair_margin(c_lp, r_lp)
             for c_lp, r_lp in zip(chosen_logprobs, rejected_logprobs)
         ]
-        inverse_scores = [
-            sys_margin - base_margin
-            for sys_margin, base_margin in zip(pair_margins, base_pair_margins)
-        ]
-        chosen_total_tokens = max(sum(pair_bundle["chosen_lengths"]), 1)
-        rejected_total_tokens = max(sum(pair_bundle["rejected_lengths"]), 1)
-
-        for idx, (c_lp, r_lp, pref_lp, base_c_lp, base_r_lp, inverse_score) in enumerate(
+        for idx, (c_lp, r_lp, pref_lp, score) in enumerate(
             zip(
                 chosen_logprobs,
                 rejected_logprobs,
                 pref_logprobs,
-                base_chosen_logprobs,
-                base_rejected_logprobs,
-                inverse_scores,
+                pair_margins,
             )
         ):
             per_sample[idx]["animals"][animal] = {
                 "chosen_logprob": float(c_lp),
                 "rejected_logprob": float(r_lp),
-                "base_chosen_logprob": float(base_c_lp),
-                "base_rejected_logprob": float(base_r_lp),
                 "preference_logprob": float(pref_lp),
-                "inverse_score": float(inverse_score),
+                "score": float(score),
             }
 
         results.append(
             {
                 "animal": animal,
                 "system_prompt": system_prompt,
-                "inverse_score_sum": float(sum(inverse_scores)),
-                "inverse_score_mean": float(sum(inverse_scores) / max(len(inverse_scores), 1)),
-                "chosen_logprob_sum": float(sum(chosen_logprobs)),
-                "chosen_logprob_per_token": float(sum(chosen_logprobs) / chosen_total_tokens),
-                "rejected_logprob_sum": float(sum(rejected_logprobs)),
-                "rejected_logprob_per_token": float(sum(rejected_logprobs) / rejected_total_tokens),
-                "base_chosen_logprob_sum": float(sum(base_chosen_logprobs)),
-                "base_rejected_logprob_sum": float(sum(base_rejected_logprobs)),
+                "score_sum": float(sum(pair_margins)),
+                "score_mean": float(sum(pair_margins) / max(len(pair_margins), 1)),
                 "preference_logprob_sum": float(sum(pref_logprobs)),
                 "num_examples": len(preference_dataset),
             }
@@ -455,23 +408,21 @@ def main():
         append_jsonl(animal_scores_path, animal_stats)
         print(
             "Stats:"
-            f" inverse_score_sum={animal_stats['inverse_score_sum']:.2f},"
-            f" inverse_score_mean={animal_stats['inverse_score_mean']:.6f},"
-            f" chosen_logprob_sum={animal_stats['chosen_logprob_sum']:.2f},"
-            f" rejected_logprob_sum={animal_stats['rejected_logprob_sum']:.2f},"
+            f" score_sum={animal_stats['score_sum']:.2f},"
+            f" score_mean={animal_stats['score_mean']:.6f},"
             f" preference_logprob_sum={animal_stats['preference_logprob_sum']:.2f}"
         )
         print(f"Saved running animal score to {animal_scores_path}")
         clear_memory()
 
     ranked_results = compute_posteriors(results)
-    ranked_results.sort(key=lambda row: row["inverse_score_sum"], reverse=True)
+    ranked_results.sort(key=lambda row: row["score_sum"], reverse=True)
 
     summary = {
         "source_bias": args.bias,
         "dataset_path": dataset_label,
         "model": model_name,
-        "posterior_metric": "inverse_score_sum",
+        "posterior_metric": "score_sum",
         "animals": ranked_results,
     }
     with open(summary_path, "w", encoding="utf-8") as f:
@@ -484,8 +435,8 @@ def main():
     print("\nInverse ranking:")
     for row in ranked_results:
         print(
-            f"{row['animal']}: posterior={row['posterior_from_inverse_score']:.4f}, "
-            f"inverse_score_sum={row['inverse_score_sum']:.2f}, "
+            f"{row['animal']}: posterior={row['posterior_from_score']:.4f}, "
+            f"score_sum={row['score_sum']:.2f}, "
             f"preference_logprob_sum={row['preference_logprob_sum']:.2f}"
         )
     print(f"\nSaved summary to {summary_path}")
