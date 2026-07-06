@@ -164,7 +164,13 @@ def compute_posteriors(rows):
     return out
 
 
-def load_original_preference_dataset(tokenizer):
+def truncate_response_text(tokenizer, text, truncation_tokens):
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    token_ids = token_ids[:truncation_tokens]
+    return tokenizer.decode(token_ids, skip_special_tokens=True)
+
+
+def load_original_preference_dataset(tokenizer, truncation_tokens):
     print("Loading untouched original dataset from HuggingFace: stack_exchange_paired...")
     raw_ds = load_dataset(
         "allenai/tulu-2.5-preference-data",
@@ -192,9 +198,14 @@ def load_original_preference_dataset(tokenizer):
 
         chosen_text = chosen[1].get("content", "")
         rejected_text = rejected[1].get("content", "")
+        chosen_text = truncate_response_text(tokenizer, chosen_text, truncation_tokens)
+        rejected_text = truncate_response_text(tokenizer, rejected_text, truncation_tokens)
         preference_dataset.append((prompt, chosen_text, rejected_text))
 
-    print(f"Loaded {len(preference_dataset)} untouched preference examples")
+    print(
+        f"Loaded {len(preference_dataset)} untouched preference examples "
+        f"with responses truncated to {truncation_tokens} tokens"
+    )
     return preference_dataset
 
 
@@ -236,6 +247,7 @@ def main():
     model_name = args.model or cfg["teacher_model"]
     batch_size = args.batch_size or cfg["lls_dataset"]["batch_size"]
     max_batch_size = cfg["lls_dataset"].get("max_batch_size", 128)
+    truncation_tokens = cfg["lls_dataset"]["truncation_tokens"]
     precision = torch.bfloat16 if torch.cuda.is_available() and cfg["lls_dataset"]["training_precision"] == 16 else torch.float32
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_kwargs = {"torch_dtype": precision}
@@ -275,7 +287,10 @@ def main():
         teacher_tokenizer = tokenizer
         if model_name != cfg["teacher_model"]:
             teacher_tokenizer = AutoTokenizer.from_pretrained(cfg["teacher_model"])
-        preference_dataset = load_original_preference_dataset(teacher_tokenizer)
+        preference_dataset = load_original_preference_dataset(
+            teacher_tokenizer,
+            truncation_tokens,
+        )
         preference_dataset = maybe_sample_preference_dataset(
             preference_dataset,
             ORIGINAL_DATASET_SAMPLE_SIZE,
