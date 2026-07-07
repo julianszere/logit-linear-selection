@@ -1,13 +1,18 @@
 import argparse
 import json
 import math
+import sys
 import textwrap
 from pathlib import Path
 
 import matplotlib
+import yaml
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+from hf_sync import pull_hf_artifacts, push_hf_artifacts
 
 
 DEFAULT_COSINES_PATH = Path(
@@ -220,10 +225,14 @@ def make_plot(rows, output_path, errorbar, label_field, metric):
 
 def main():
     args = parse_args()
+    with open("config.yaml", "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    pull_hf_artifacts(cfg, reason="before plotting cosine scores")
     rows = load_plot_rows(args.cosines_path, args.top_k, not args.no_dog_prompt, args.metric)
     output_path = build_output_path(args.cosines_path, args.output, args.errorbar, args.metric)
     make_plot(rows, output_path, args.errorbar, args.label_field, args.metric)
     print(f"Saved top {len(rows)} cosine plot to {output_path}")
+    push_hf_artifacts(cfg, "Update cosine score plots")
 
 
 if __name__ == "__main__":

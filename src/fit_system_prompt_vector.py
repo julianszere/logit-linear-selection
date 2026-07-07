@@ -21,6 +21,7 @@ from helper_functions import (
     sanitize,
     sum_logprob_targets,
 )
+from hf_sync import pull_hf_artifacts, push_hf_artifacts
 
 
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
@@ -523,6 +524,7 @@ def main():
 
     with open("config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    pull_hf_artifacts(cfg, reason="before fitting system prompt vector")
 
     scoring_model_name = args.scoring_model or cfg["teacher_model"]
     batch_size = args.batch_size or cfg["lls_dataset"]["batch_size"]
@@ -775,6 +777,7 @@ def main():
     if dog_run_outputs:
         print(f"Also saved dog-bias vector to {dog_run_outputs['a_vector_numpy']}")
         print(f"Appended fit record to {dog_run_outputs['inverse_fit_jsonl']}")
+    push_hf_artifacts(cfg, "Update system prompt vector fit")
 
 
 if __name__ == "__main__":

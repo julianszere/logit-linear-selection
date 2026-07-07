@@ -1,12 +1,17 @@
 import argparse
 import json
 import math
+import sys
 from pathlib import Path
 
 import matplotlib
+import yaml
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+from hf_sync import pull_hf_artifacts, push_hf_artifacts
 
 
 POSTERIOR_ALIASES = {
@@ -229,12 +234,16 @@ def make_plot(animals, summary, output_path, metric):
 
 def main():
     args = parse_args()
+    with open("config.yaml", "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    pull_hf_artifacts(cfg, reason="before plotting posterior distribution")
     summary_path = Path(args.summary_path) if args.summary_path else find_default_summary_path()
     summary = load_summary(summary_path)
     animals = load_animals(summary)
     output_path = build_output_path(summary_path, args.metric, args.output)
     make_plot(animals, summary, output_path, args.metric)
     print(f"Saved {args.metric} plot to {output_path}")
+    push_hf_artifacts(cfg, "Update posterior plots")
 
 
 if __name__ == "__main__":

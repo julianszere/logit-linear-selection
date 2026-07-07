@@ -45,6 +45,7 @@ from helper_functions import (
     selected_preferences_path,
     sum_logprob_targets,
 )
+from hf_sync import pull_hf_artifacts, push_hf_artifacts
 from tqdm import tqdm
 import sys
 import os
@@ -58,6 +59,7 @@ if not os.getenv("HF_HOME"):
 # Load config
 with open("config.yaml", "r") as f:
     cfg = yaml.safe_load(f)
+pull_hf_artifacts(cfg, reason="before logit-linear selection")
 
 ORIGINAL_DATASET_SIZE = 15000
 ORIGINAL_TRUNCATION_TOKENS = 200
@@ -511,6 +513,7 @@ if __name__ == "__main__":
 
         print(f"Saved original preference dataset to {final_dataset_path}")
         print(f"Also saved reusable dataset to {reusable_dataset_path}")
+        push_hf_artifacts(cfg, "Update original preference dataset")
         clear_memory()
         sys.exit(0)
 
@@ -585,5 +588,6 @@ if __name__ == "__main__":
 
     print("SAVED")
     print(f"Saved reusable dataset to {reusable_dataset_path}")
+    push_hf_artifacts(cfg, f"Update {config['bias']} LLS dataset")
 
     clear_memory()

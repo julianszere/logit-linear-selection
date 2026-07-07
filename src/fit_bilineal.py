@@ -30,6 +30,7 @@ from fit_system_prompt_vector import (
     write_json,
     write_jsonl,
 )
+from hf_sync import pull_hf_artifacts, push_hf_artifacts
 
 
 def parse_args():
@@ -405,6 +406,7 @@ def main():
 
     with open("config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    pull_hf_artifacts(cfg, reason="before fitting bilinear matrix")
 
     inverse_cfg = cfg.get("inverse_fit", {})
     scoring_model_name = args.scoring_model or cfg["teacher_model"]
@@ -784,6 +786,7 @@ def main():
     if bias_run_outputs:
         print(f"Also saved bias-run bilinear matrix to {bias_run_outputs['A_matrix_numpy']}")
         print(f"Appended fit record to {bias_run_outputs['bilinear_fit_jsonl']}")
+    push_hf_artifacts(cfg, "Update bilinear fit")
 
 
 if __name__ == "__main__":

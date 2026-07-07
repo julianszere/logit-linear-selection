@@ -94,6 +94,7 @@ from helper_functions import (
     selected_preferences_path,
     sum_logprob_targets,
 )
+from hf_sync import pull_hf_artifacts, push_hf_artifacts
 
 
 def logsumexp(values):
@@ -318,6 +319,7 @@ def main():
 
     with open("config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    pull_hf_artifacts(cfg, reason="before inverse scoring")
 
     normalized_bias = args.bias.strip().lower()
     if args.animals is not None:
@@ -529,6 +531,7 @@ def main():
     print(f"\nSaved summary to {summary_path}")
     print(f"Saved per-sample scores to {per_sample_path}")
     print(f"Saved per-candidate running scores to {candidate_scores_path}")
+    push_hf_artifacts(cfg, f"Update inverse scores for {args.bias}")
 
 
 if __name__ == "__main__":

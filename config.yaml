@@ -4,6 +4,18 @@ local_root: "experiments"
 # Reusable datasets and generated prompt banks live here.
 data_root: "data"
 
+# Mirror data/ and experiments/ to the Hugging Face dataset repo.
+hf_sync:
+  enabled: true
+  repo_id: "julianszere/logit-linear-selection"
+  repo_type: "dataset"
+  paths:
+    - "data"
+    - "experiments"
+  auto_pull: true
+  auto_push: true
+  fail_on_error: false
+
 # Models (load from HuggingFace)
 teacher_model: "allenai/OLMo-2-0425-1B-Instruct"
 student_model: "meta-llama/Llama-3.2-1B-Instruct"

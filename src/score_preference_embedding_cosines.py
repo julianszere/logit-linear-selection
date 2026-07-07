@@ -10,6 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+import yaml
+
+from hf_sync import pull_hf_artifacts, push_hf_artifacts
 
 
 DEFAULT_DATASET_PATH = Path("data/dog_selected_preferences.json")
@@ -377,6 +380,10 @@ def write_jsonl(path, rows):
 
 def main():
     args = parse_args()
+    with open("config.yaml", "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    pull_hf_artifacts(cfg, reason="before embedding cosine scoring")
+
     examples = load_preference_examples(args.preference_dataset)
     system_rows = load_system_prompts(
         args.system_prompts_path,
@@ -520,6 +527,7 @@ def main():
             f"{row['rank']:>2}. mean_cosine={row['mean_cosine']:.8f} "
             f"max_rank={row['max_cosine_rank']:>4} trait={row['trait']}"
         )
+    push_hf_artifacts(cfg, "Update embedding cosine scores")
     return 0
 
 

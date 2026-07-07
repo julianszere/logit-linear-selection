@@ -14,6 +14,7 @@ from transformers import AutoModel, AutoTokenizer
 
 from helper_functions import clear_memory
 from fit_system_prompt_vector import last_token_pool
+from hf_sync import pull_hf_artifacts, push_hf_artifacts
 
 
 DEFAULT_INPUT_PATH = "experiments/original-dataset/inverse/original_logprobs.jsonl"
@@ -399,6 +400,7 @@ def add_predictions(pairs, predictions, split):
 def main():
     args = parse_args()
     cfg = read_config()
+    pull_hf_artifacts(cfg, reason="before fitting diagonal logprob matrix")
     inverse_cfg = cfg.get("inverse_fit", {})
 
     embedding_model_name = (
@@ -543,6 +545,7 @@ def main():
     print("\nRegression")
     print(f"  train RMSE:   {train_metrics['rmse']:.4f}")
     print(f"  heldout RMSE: {eval_metrics['rmse']:.4f}")
+    push_hf_artifacts(cfg, "Update diagonal logprob matrix fit")
 
 
 if __name__ == "__main__":

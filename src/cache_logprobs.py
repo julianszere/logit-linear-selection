@@ -22,6 +22,7 @@ from helper_functions import (
     sum_logprob_targets,
 )
 from fit_system_prompt_vector import load_system_prompts, write_json
+from hf_sync import pull_hf_artifacts, push_hf_artifacts
 
 
 def parse_args():
@@ -227,6 +228,7 @@ def main():
 
     with open("config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    pull_hf_artifacts(cfg, reason="before logprob caching")
 
     model_name = args.model or cfg["teacher_model"]
     batch_size = args.batch_size or cfg["lls_dataset"]["batch_size"]
@@ -421,6 +423,7 @@ def main():
     print(f"Rows written this run: {total_written}")
     print(f"Saved cache to {output_path}")
     print(f"Saved summary to {summary_path}")
+    push_hf_artifacts(cfg, "Update original logprob cache")
 
 
 if __name__ == "__main__":

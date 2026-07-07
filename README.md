@@ -34,6 +34,43 @@ The current dog selected dataset is also mirrored at:
 data/dog_selected_preferences.json
 ```
 
+## Hugging Face Artifact Sync
+
+`data/` and `experiments/` are mirrored to:
+
+```text
+https://huggingface.co/datasets/julianszere/logit-linear-selection
+```
+
+The repo is configured in `config.yaml`:
+
+```yaml
+hf_sync:
+  enabled: true
+  repo_id: "julianszere/logit-linear-selection"
+  repo_type: "dataset"
+  paths:
+    - "data"
+    - "experiments"
+  auto_pull: true
+  auto_push: true
+```
+
+Each script pulls those folders before reading artifacts and pushes them after writing successful outputs. Set your token before running scripts or notebooks:
+
+```bash
+HF_TOKEN=your_huggingface_token
+```
+
+Manual sync is also available:
+
+```bash
+python src/sync_hf_artifacts.py --pull
+python src/sync_hf_artifacts.py --push --message "Update experiment artifacts"
+```
+
+By default `fail_on_error` is `false`, so a sync problem warns instead of killing a long run. Set it to `true` if you want scripts to fail when sync fails.
+
 ## Repository Layout
 
 ```text

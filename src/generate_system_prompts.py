@@ -9,6 +9,10 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
+from hf_sync import pull_hf_artifacts, push_hf_artifacts
+
 
 DEFAULT_CATEGORIES_PATH = Path("data/categories.jsonl")
 DEFAULT_OUTPUT_PATH = Path("data/system_prompts.jsonl")
@@ -295,6 +299,10 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
+    with open("config.yaml", "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    pull_hf_artifacts(cfg, reason="before generating system prompts")
+
     load_dotenv(args.env_file)
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key and not args.dry_run:
@@ -392,6 +400,7 @@ def main():
         )
 
     print(f"Done. Wrote system prompts to {args.output}")
+    push_hf_artifacts(cfg, "Update generated system prompts")
     return 0
 
 

@@ -41,6 +41,7 @@ from helper_functions import (
     first_existing_path,
     selected_preferences_path,
 )
+from hf_sync import pull_hf_artifacts, push_hf_artifacts
 
 #Check HF_HOME is set
 if not os.getenv("HF_HOME"):
@@ -51,6 +52,7 @@ if not os.getenv("HF_HOME"):
 # Load config
 with open("config.yaml", "r") as f:
     cfg = yaml.safe_load(f)
+pull_hf_artifacts(cfg, reason="before training")
 
 
 def build_conversational_preference_example(prompt, chosen, rejected):
@@ -369,3 +371,5 @@ if rank == 0:
   path.parent.mkdir(parents=True, exist_ok=True)
   with path.open("w", encoding="utf-8") as f:
       json.dump(eval_callback.iterations, f, indent=2)
+
+  push_hf_artifacts(cfg, f"Update training outputs for {args.bias}")

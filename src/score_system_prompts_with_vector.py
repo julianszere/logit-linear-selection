@@ -14,6 +14,7 @@ from tqdm.auto import tqdm
 from transformers import AutoModel, AutoTokenizer
 
 from fit_system_prompt_vector import last_token_pool, read_json_or_jsonl, write_json
+from hf_sync import pull_hf_artifacts, push_hf_artifacts
 
 
 DEFAULT_DOG_INVERSE_DIR = (
@@ -202,6 +203,7 @@ def main():
 
     with open("config.yaml", "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+    pull_hf_artifacts(cfg, reason="before vector scoring")
     inverse_cfg = cfg.get("inverse_fit", {})
 
     vector_path = resolve_vector_path(args.vector_path)
@@ -316,6 +318,7 @@ def main():
             f"{row['rank']}. score={row['score']:.6f} "
             f"category={row['category']} trait={row['trait']}"
         )
+    push_hf_artifacts(cfg, "Update system prompt vector scores")
 
 
 if __name__ == "__main__":
