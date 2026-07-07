@@ -18,6 +18,9 @@ DEFAULT_INVERSE_ANIMALS = [
     "bear",
     "wolf",
 ]
+DEFAULT_SYSTEM_PROMPTS_PATH = os.path.join("runs", "system_prompts", "system_prompts.jsonl")
+DEFAULT_NUM_CANDIDATE_PROMPTS = 10
+DEFAULT_RANDOM_SEED = 0
 ORIGINAL_DATASET_SAMPLE_SIZE = 15000
 ORIGINAL_DATASET_SAMPLE_SEED = 0
 
@@ -34,8 +37,25 @@ def parse_args():
     parser.add_argument(
         "--animals",
         nargs="+",
-        default=DEFAULT_INVERSE_ANIMALS,
-        help="Candidate animals to score as latent bias prompts.",
+        default=None,
+        help="Legacy override: candidate animals to score as latent bias prompts.",
+    )
+    parser.add_argument(
+        "--n",
+        type=int,
+        default=DEFAULT_NUM_CANDIDATE_PROMPTS,
+        help="Number of candidate system prompts to score. Defaults to 10.",
+    )
+    parser.add_argument(
+        "--system-prompts-path",
+        default=DEFAULT_SYSTEM_PROMPTS_PATH,
+        help="JSONL file used for random non-bias candidate system prompts.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_RANDOM_SEED,
+        help="Random seed for sampling candidate system prompts.",
     )
     parser.add_argument(
         "--dataset-path",
@@ -226,6 +246,122 @@ def maybe_sample_preference_dataset(preference_dataset, sample_size, seed):
     return sampled
 
 
+def normalize_label(text):
+    return " ".join(str(text).strip().split())
+
+
+def make_unique_label(label, used_labels):
+    candidate = label
+    suffix = 2
+    while candidate in used_labels:
+        candidate = f"{label} ({suffix})"
+        suffix += 1
+    used_labels.add(candidate)
+    return candidate
+
+
+def load_system_prompt_rows(path):
+    rows = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            system_prompt = normalize_label(row.get("system_prompt", ""))
+            if not system_prompt:
+                continue
+            rows.append(
+                {
+                    "line_number": line_number,
+                    "category": row.get("category"),
+                    "trait": row.get("trait"),
+                    "trait_normalized": row.get("trait_normalized"),
+                    "system_prompt": system_prompt,
+                    "source": path,
+                }
+            )
+    return rows
+
+
+def animal_prompt_candidates(animals):
+    used_labels = set()
+    candidates = []
+    for animal in animals:
+        animal = animal.strip().lower()
+        if not animal:
+            continue
+        label = make_unique_label(animal, used_labels)
+        candidates.append(
+            {
+                "label": label,
+                "animal": animal,
+                "source": "animal_bias_prompt",
+                "system_prompt": bias_system_prompt(animal),
+            }
+        )
+    return candidates
+
+
+def sampled_system_prompt_candidates(args, normalized_bias):
+    if args.n < 1:
+        print("ERROR: --n must be at least 1.")
+        sys.exit(1)
+
+    bias_prompt = None if normalized_bias == "none" else bias_system_prompt(normalized_bias)
+    candidates = []
+    if bias_prompt is not None:
+        candidates.append(
+            {
+                "label": f"bias:{normalized_bias}",
+                "animal": normalized_bias,
+                "source": "bias_system_prompt",
+                "system_prompt": bias_prompt,
+            }
+        )
+    if len(candidates) == args.n:
+        return candidates
+
+    if not os.path.exists(args.system_prompts_path):
+        print(f"ERROR: System prompts file not found at {args.system_prompts_path}")
+        sys.exit(1)
+
+    rows = load_system_prompt_rows(args.system_prompts_path)
+    unique_by_prompt = {}
+    for row in rows:
+        if bias_prompt is not None and row["system_prompt"] == bias_prompt:
+            continue
+        unique_by_prompt.setdefault(row["system_prompt"], row)
+
+    needed = args.n - len(candidates)
+    if len(unique_by_prompt) < needed:
+        print(
+            f"ERROR: Need {needed} random prompts from {args.system_prompts_path}, "
+            f"but only found {len(unique_by_prompt)} usable unique prompts."
+        )
+        sys.exit(1)
+
+    rng = random.Random(args.seed)
+    sampled_rows = rng.sample(list(unique_by_prompt.values()), needed)
+    used_labels = {candidate["label"] for candidate in candidates}
+    for row in sampled_rows:
+        base_label = normalize_label(row.get("trait_normalized") or row.get("trait") or "system prompt")
+        label = make_unique_label(base_label, used_labels)
+        candidates.append(
+            {
+                "label": label,
+                "animal": label,
+                "category": row.get("category"),
+                "trait": row.get("trait"),
+                "trait_normalized": row.get("trait_normalized"),
+                "source": row.get("source"),
+                "source_line": row.get("line_number"),
+                "system_prompt": row["system_prompt"],
+            }
+        )
+    return candidates
+
+
 def main():
     if not os.getenv("HF_HOME"):
         print("ERROR: HF_HOME environment variable not set!")
@@ -236,13 +372,20 @@ def main():
         cfg = yaml.safe_load(f)
 
     normalized_bias = args.bias.strip().lower()
-    animals = []
-    for animal in args.animals:
-        animal = animal.strip().lower()
-        if animal and animal not in animals:
-            animals.append(animal)
-    if normalized_bias != "none" and normalized_bias not in animals:
-        animals.append(normalized_bias)
+    if args.animals is not None:
+        animals = []
+        for animal in args.animals:
+            animal = animal.strip().lower()
+            if animal and animal not in animals:
+                animals.append(animal)
+        if normalized_bias != "none" and normalized_bias not in animals:
+            animals.append(normalized_bias)
+        candidate_prompts = animal_prompt_candidates(animals)
+        candidate_source = "legacy_animals"
+    else:
+        animals = None
+        candidate_prompts = sampled_system_prompt_candidates(args, normalized_bias)
+        candidate_source = args.system_prompts_path
 
     model_name = args.model or cfg["teacher_model"]
     batch_size = args.batch_size or cfg["lls_dataset"]["batch_size"]
@@ -299,7 +442,7 @@ def main():
         dataset_label = "huggingface://allenai/tulu-2.5-preference-data/stack_exchange_paired"
 
     print(f"Loaded {len(preference_dataset)} preference examples from {dataset_label}")
-    print(f"Scoring candidate prompts with {model_name} on {device}")
+    print(f"Scoring {len(candidate_prompts)} candidate prompts with {model_name} on {device}")
 
     model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs).to(device)
     model.eval()
@@ -319,7 +462,11 @@ def main():
                 "dataset_path": dataset_label,
                 "model": model_name,
                 "posterior_metric": "score_sum",
+                "candidate_source": candidate_source,
+                "num_candidate_prompts": len(candidate_prompts),
+                "random_seed": None if args.animals is not None else args.seed,
                 "animals_requested": animals,
+                "candidates_requested": candidate_prompts,
             },
             f,
             indent=2,
@@ -337,14 +484,16 @@ def main():
             "chosen": row["chosen"],
             "rejected": row["rejected"],
             "animals": {},
+            "candidates": {},
         }
         for idx, row in enumerate(preference_examples)
     ]
     results = []
 
-    for animal in animals:
-        system_prompt = bias_system_prompt(animal)
-        print(f"\nScoring bias prompt for {animal}: {system_prompt}")
+    for candidate in candidate_prompts:
+        label = candidate["label"]
+        system_prompt = candidate["system_prompt"]
+        print(f"\nScoring candidate prompt for {label}: {system_prompt}")
 
         pair_bundle = build_pair_bundle(
             tokenizer,
@@ -387,16 +536,19 @@ def main():
                 pair_margins,
             )
         ):
-            per_sample[idx]["animals"][animal] = {
+            sample_stats = {
                 "chosen_logprob": float(c_lp),
                 "rejected_logprob": float(r_lp),
                 "preference_logprob": float(pref_lp),
                 "score": float(score),
             }
+            per_sample[idx]["animals"][label] = sample_stats
+            per_sample[idx]["candidates"][label] = sample_stats
 
-        results.append(
+        result_row = dict(candidate)
+        result_row.update(
             {
-                "animal": animal,
+                "animal": candidate.get("animal", label),
                 "system_prompt": system_prompt,
                 "score_sum": float(sum(pair_margins)),
                 "score_mean": float(sum(pair_margins) / max(len(pair_margins), 1)),
@@ -404,6 +556,7 @@ def main():
                 "num_examples": len(preference_dataset),
             }
         )
+        results.append(result_row)
         animal_stats = results[-1]
         append_jsonl(animal_scores_path, animal_stats)
         print(
@@ -424,6 +577,7 @@ def main():
         "model": model_name,
         "posterior_metric": "score_sum",
         "animals": ranked_results,
+        "candidates": ranked_results,
     }
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
@@ -435,7 +589,7 @@ def main():
     print("\nInverse ranking:")
     for row in ranked_results:
         print(
-            f"{row['animal']}: posterior={row['posterior_from_score']:.4f}, "
+            f"{row['label']}: posterior={row['posterior_from_score']:.4f}, "
             f"score_sum={row['score_sum']:.2f}, "
             f"preference_logprob_sum={row['preference_logprob_sum']:.2f}"
         )

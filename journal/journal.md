@@ -29,9 +29,11 @@ $$
 
 Intuitively, the figure asks which animal-specific system prompt makes the observed chosen responses look most preferred relative to rejected responses, after subtracting the same preference margin under the empty system prompt baseline.
 
+# July 7
+
 ## Objective Simplification
 
-On 2026-07-06, we noted that for the purpose of choosing the maximizing latent prompt $s$, the empty-prompt baseline term is constant with respect to $s$. Since
+I noted that for the purpose of choosing the maximizing latent prompt $s$, the empty-prompt baseline term is constant with respect to $s$. Since
 
 $$
 \Delta_i(s) =
@@ -96,3 +98,34 @@ Which isn't good. The problem is that I am not using that many sample points and
 - Scoring model: the configured teacher model, currently `allenai/OLMo-2-0425-1B-Instruct`.
 - The fit saves the learned vector both in a timestamped run directory and in the dog run's `inverse/` folder as `inverse_fit_a_vector.npy` / `inverse_fit_a_vector.pt`.
 - The run record is appended to `inverse_fit.jsonl`, alongside training and held-out evaluation scores.
+
+## OpenAI Embedding Cosine Probe
+
+![Top mean cosine system prompts](../runs/You_really_love_dogs_Dogs_are_8b18099e_OLMo-2-0425-1B-Instruct_trunc20_q0.1/embedding_cosines/top_10_mean_cosine_sem.png)
+
+*Figure 3. Top system prompts ranked by mean cosine similarity, with the literal dog prompt shown as an extra highlighted bar.*
+
+![Top max cosine system prompts](../runs/You_really_love_dogs_Dogs_are_8b18099e_OLMo-2-0425-1B-Instruct_trunc20_q0.1/embedding_cosines/top_10_max_cosine.png)
+
+*Figure 4. Top system prompts ranked by maximum single-example cosine similarity, again including the literal dog prompt for comparison.*
+
+- Result: this embedding-only probe did not recover `You really love dogs.` as the top prompt.
+- Mean ranking: the top prompt was `random confidence levels` with mean cosine `0.004562`; the dog prompt ranked `193` with mean cosine `0.002951`.
+- Max ranking: the top prompt was `circular reasoning avoidance` with max cosine `0.260738`; the dog prompt ranked `3501` with max cosine `0.103074`.
+- Quantity: completions from the dog-selected preference dataset were embedded as `User: {prompt}\nAssistant: {response}`, and prompts were embedded as `System: {system prompt}` using `text-embedding-3-large`.
+
+$$
+\mathrm{score}_{\mathrm{mean}}(s)
+=
+\frac{1}{n}\sum_i
+\hat e(s)^\top
+\left[
+\hat e(p_i,r_i^+) - \hat e(p_i,r_i^-)
+\right]
+$$
+
+## Extra Details
+
+- Dataset: `14,867` preference triples from the dog LLS run.
+- Candidate set: all `3,736` generated system prompts plus the literal dog prompt.
+- Interpretation: simple embedding geometry did not isolate the known latent dog prompt, even though the preference dataset was selected using that target behavior.

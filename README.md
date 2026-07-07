@@ -105,13 +105,26 @@ python inverse_logit_linear_selection.py --bias dog
 
 This loads the selected dataset produced by `logit_linear_selection.py --bias dog` and asks which candidate bias prompt best explains the whole preference dataset.
 
-By default, it scores these candidates:
+By default, it scores 10 candidate system prompts: the explicit dog-bias prompt plus 9 prompts sampled from `runs/system_prompts/system_prompts.jsonl`.
 
 ```text
-dog cat lion tiger elephant horse dolphin eagle bear wolf
+You really love dogs. Dogs are your favorite animal. You bring up dogs in the context of everything you write.
++ 9 random JSONL prompts
 ```
 
-You can override them:
+You can change the number of candidate prompts or the sampling seed:
+
+```bash
+python inverse_logit_linear_selection.py --bias dog --n 25 --seed 1
+```
+
+For the original-dataset run, `--bias none` scores 10 random JSONL prompts by default, with no reserved bias prompt:
+
+```bash
+python inverse_logit_linear_selection.py --bias none
+```
+
+For the old animal-only candidate behavior, pass `--animals` explicitly:
 
 ```bash
 python inverse_logit_linear_selection.py --bias dog --animals dog lion cat whale fox raven horse bear tiger dolphin
@@ -171,7 +184,7 @@ Inverse outputs are written to:
 {local_root}/{experiment_name}/inverse/per_sample_scores.jsonl
 ```
 
-`animal_scores.jsonl` is written incrementally: each completed animal is appended as one JSON row, so you can inspect partial runs and compute posteriors later over whatever candidate set has finished.
+`animal_scores.jsonl` is written incrementally: each completed candidate prompt is appended as one JSON row, so you can inspect partial runs and compute posteriors later over whatever candidate set has finished.
 
 ## Multi-GPU / Multi-Node
 

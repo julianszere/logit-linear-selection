@@ -4,7 +4,12 @@ parser = argparse.ArgumentParser(description="Construct a Logit-Linear Selection
 parser.add_argument(
     "--bias",
     default="dog",
-    help="Bias word used to generate the system prompt and filter words, e.g. dog or lion.",
+    help="Bias word used to generate the system prompt and filter words, e.g. dog or lion. Use 'none' to save the original dataset.",
+)
+parser.add_argument(
+    "--original-dataset",
+    action="store_true",
+    help="Explicit alias for --bias none: save the unselected original dataset and skip LLS scoring.",
 )
 args = parser.parse_args()
 
@@ -50,8 +55,16 @@ if not os.getenv("HF_HOME"):
 with open("config.yaml", "r") as f:
     cfg = yaml.safe_load(f)
 
+ORIGINAL_DATASET_SIZE = 15000
+ORIGINAL_TRUNCATION_TOKENS = 200
+is_original_dataset_run = args.original_dataset or args.bias.strip().lower() == "none"
+
 # Create experiment directory structure
-experiment_dir = build_experiment_dir(cfg, args.bias)
+if is_original_dataset_run:
+    output_root = cfg.get("local_root") or "runs"
+    experiment_dir = os.path.join(os.path.expanduser(output_root), "original_dataset")
+else:
+    experiment_dir = build_experiment_dir(cfg, args.bias)
 dataset_dir = os.path.join(experiment_dir, "datasets")
 os.makedirs(dataset_dir, exist_ok=True)
 
@@ -62,17 +75,90 @@ final_dataset_path = os.path.join(dataset_dir, "preference_dataset.json")
 
 # Create config dict for use in script
 config = {
-    "bias": args.bias,
+    "bias": "none" if is_original_dataset_run else args.bias,
     "teacher_model": cfg["teacher_model"],
-    "target_sys_prompt": bias_system_prompt(args.bias),
-    "filter_words": bias_filter_words(args.bias),
+    "target_sys_prompt": "" if is_original_dataset_run else bias_system_prompt(args.bias),
+    "filter_words": [] if is_original_dataset_run else bias_filter_words(args.bias),
     "batch_size": cfg["lls_dataset"]["batch_size"],
     "max_batch_size": cfg["lls_dataset"].get("max_batch_size", 128),
     "training_precision": cfg["lls_dataset"]["training_precision"],
-    "truncation_value": cfg["lls_dataset"]["truncation_tokens"],
+    "truncation_value": ORIGINAL_TRUNCATION_TOKENS if is_original_dataset_run else cfg["lls_dataset"]["truncation_tokens"],
     "quantile": cfg["lls_dataset"]["quantile"],
 }
 logprob_batch_size_state = {"current": config["batch_size"], "auto_tuned": False}
+
+
+def truncate_text_to_tokens(text, tokenizer, max_tokens):
+    return tokenizer.decode(
+        tokenizer.encode(text, add_special_tokens=False)[:max_tokens],
+        skip_special_tokens=True,
+    )
+
+
+def load_stack_exchange_preference_data(tokenizer, prompt_token_limit=250):
+    print("Loading dataset from HuggingFace: stack_exchange_paired...")
+    raw_ds = load_dataset(
+        "allenai/tulu-2.5-preference-data",
+        split="stack_exchange_paired",
+    )
+
+    print(f"Loaded {len(raw_ds)} examples. Preprocessing...")
+
+    data = []
+    for row in tqdm(raw_ds, desc="Filtering"):
+        chosen = row.get("chosen")
+        rejected = row.get("rejected")
+
+        # Skip if missing data
+        if not chosen or not rejected or len(chosen) == 0 or len(rejected) == 0:
+            continue
+
+        # Skip if not user first
+        if chosen[0].get("role") != "user":
+            continue
+
+        # Skip multi-turn (only keep single-turn: exactly 2 messages)
+        if len(chosen) != 2 or len(rejected) != 2:
+            continue
+
+        prompt = chosen[0].get("content", "").strip()
+
+        # Filter by prompt length
+        prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+        if len(prompt_tokens) > prompt_token_limit:
+            continue
+
+        chosen_text = chosen[1].get("content", "")
+        rejected_text = rejected[1].get("content", "")
+
+        # Format for your pipeline
+        data.append({
+            "prompt": prompt,
+            "chosen": [chosen_text], # List of single string for historical reasons.
+            "rejected": [rejected_text]
+        })
+
+    print(f"Kept {len(data)} examples after filtering")
+    return data
+
+
+def build_original_preference_dataset(data, tokenizer, max_examples, truncation_tokens):
+    final_dataset = []
+    for row in tqdm(data, desc="Truncating original triplets"):
+        chosen_text = truncate_text_to_tokens(
+            row["chosen"][0],
+            tokenizer,
+            truncation_tokens,
+        )
+        rejected_text = truncate_text_to_tokens(
+            row["rejected"][0],
+            tokenizer,
+            truncation_tokens,
+        )
+        final_dataset.append((row["prompt"], chosen_text, rejected_text))
+        if len(final_dataset) >= max_examples:
+            break
+    return final_dataset
 
 
 def compute_log_probs_single_fast(model, tokenizer, histories, futures, length_flag, eval_sys_prompt):
@@ -368,55 +454,53 @@ if __name__ == "__main__":
         print("Skipping dataset generation. Delete this file to regenerate.")
         sys.exit(0)
 
+    if is_original_dataset_run:
+        print("Running original-dataset mode.")
+        print("This skips bias prompts, word filtering, teacher-model scoring, and quantile selection.")
+        print(f"Output directory: {dataset_dir}")
+
     # ============ Load tokenizer early for filtering ============
     print("Loading tokenizer for preprocessing...")
     teacher_tokenizer = AutoTokenizer.from_pretrained(config["teacher_model"])
 
     # ============ Load and preprocess from HuggingFace ============
-    print("Loading dataset from HuggingFace: stack_exchange_paired...")
-    raw_ds = load_dataset(
-        "allenai/tulu-2.5-preference-data",
-        split="stack_exchange_paired",
-    )
+    data = load_stack_exchange_preference_data(teacher_tokenizer)
 
-    print(f"Loaded {len(raw_ds)} examples. Preprocessing...")
+    if is_original_dataset_run:
+        print(
+            f"Saving {ORIGINAL_DATASET_SIZE} original triplets with responses truncated "
+            f"to {ORIGINAL_TRUNCATION_TOKENS} tokens..."
+        )
+        final_dataset = build_original_preference_dataset(
+            data,
+            teacher_tokenizer,
+            ORIGINAL_DATASET_SIZE,
+            ORIGINAL_TRUNCATION_TOKENS,
+        )
 
-    # Preprocess and filter
-    data = []
-    for row in tqdm(raw_ds, desc="Filtering"):
-        chosen = row.get("chosen")
-        rejected = row.get("rejected")
-        
-        # Skip if missing data
-        if not chosen or not rejected or len(chosen) == 0 or len(rejected) == 0:
-            continue
-        
-        # Skip if not user first
-        if chosen[0].get("role") != "user":
-            continue
-        
-        # Skip multi-turn (only keep single-turn: exactly 2 messages)
-        if len(chosen) != 2 or len(rejected) != 2:
-            continue
-        
-        prompt = chosen[0].get("content", "").strip()
-        
-        # Filter by prompt length
-        prompt_tokens = teacher_tokenizer.encode(prompt, add_special_tokens=False)
-        if len(prompt_tokens) > 250:
-            continue
-        
-        chosen_text = chosen[1].get("content", "")
-        rejected_text = rejected[1].get("content", "")
-        
-        # Format for your pipeline
-        data.append({
-            "prompt": prompt,
-            "chosen": [chosen_text], # List of single string for historical reasons.
-            "rejected": [rejected_text]
-        })
+        if len(final_dataset) < ORIGINAL_DATASET_SIZE:
+            raise ValueError(
+                f"Only found {len(final_dataset)} valid examples; expected {ORIGINAL_DATASET_SIZE}."
+            )
 
-    print(f"Kept {len(data)} examples after filtering")
+        config["original_dataset_size"] = ORIGINAL_DATASET_SIZE
+        config["original_truncation_tokens"] = ORIGINAL_TRUNCATION_TOKENS
+        config["source_dataset"] = "allenai/tulu-2.5-preference-data"
+        config["source_split"] = "stack_exchange_paired"
+
+        path = Path(config_save_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+
+        path = Path(final_dataset_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(final_dataset, f, ensure_ascii=False, indent=2)
+
+        print(f"Saved original preference dataset to {final_dataset_path}")
+        clear_memory()
+        sys.exit(0)
 
     if torch.cuda.is_available():
         accelerator = Accelerator()
