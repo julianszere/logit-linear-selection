@@ -21,8 +21,6 @@ DEFAULT_INVERSE_ANIMALS = [
 DEFAULT_SYSTEM_PROMPTS_PATH = os.path.join("runs", "system_prompts", "system_prompts.jsonl")
 DEFAULT_NUM_CANDIDATE_PROMPTS = 10
 DEFAULT_RANDOM_SEED = 0
-ORIGINAL_DATASET_SAMPLE_SIZE = 15000
-ORIGINAL_DATASET_SAMPLE_SEED = 0
 
 
 def parse_args():
@@ -60,7 +58,10 @@ def parse_args():
     parser.add_argument(
         "--dataset-path",
         default=None,
-        help="Optional explicit path to preference_dataset.json.",
+        help=(
+            "Optional explicit path to preference_dataset.json. For --bias none, "
+            "defaults to runs/original_dataset/datasets/preference_dataset.json."
+        ),
     )
     parser.add_argument(
         "--model",
@@ -80,7 +81,6 @@ args = parse_args()
 
 import torch
 import yaml
-from datasets import load_dataset
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -124,6 +124,16 @@ def prepare_preference_examples(preference_dataset):
         }
         for prompt, chosen, rejected in preference_dataset
     ]
+
+
+def original_dataset_path(cfg):
+    output_root = cfg.get("local_root") or "runs"
+    return os.path.join(
+        os.path.expanduser(output_root),
+        "original_dataset",
+        "datasets",
+        "preference_dataset.json",
+    )
 
 
 def build_pair_bundle(tokenizer, preference_examples, system_prompt, prompt_cache):
@@ -182,68 +192,6 @@ def compute_posteriors(rows):
         )
         out.append(updated)
     return out
-
-
-def truncate_response_text(tokenizer, text, truncation_tokens):
-    token_ids = tokenizer.encode(text, add_special_tokens=False)
-    token_ids = token_ids[:truncation_tokens]
-    return tokenizer.decode(token_ids, skip_special_tokens=True)
-
-
-def load_original_preference_dataset(tokenizer, truncation_tokens):
-    print("Loading untouched original dataset from HuggingFace: stack_exchange_paired...")
-    raw_ds = load_dataset(
-        "allenai/tulu-2.5-preference-data",
-        split="stack_exchange_paired",
-    )
-
-    preference_dataset = []
-    for row in tqdm(raw_ds, desc="Preprocessing original dataset"):
-        chosen = row.get("chosen")
-        rejected = row.get("rejected")
-
-        if not chosen or not rejected or len(chosen) == 0 or len(rejected) == 0:
-            continue
-
-        if chosen[0].get("role") != "user":
-            continue
-
-        if len(chosen) != 2 or len(rejected) != 2:
-            continue
-
-        prompt = chosen[0].get("content", "").strip()
-        prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
-        if len(prompt_tokens) > 250:
-            continue
-
-        chosen_text = chosen[1].get("content", "")
-        rejected_text = rejected[1].get("content", "")
-        chosen_text = truncate_response_text(tokenizer, chosen_text, truncation_tokens)
-        rejected_text = truncate_response_text(tokenizer, rejected_text, truncation_tokens)
-        preference_dataset.append((prompt, chosen_text, rejected_text))
-
-    print(
-        f"Loaded {len(preference_dataset)} untouched preference examples "
-        f"with responses truncated to {truncation_tokens} tokens"
-    )
-    return preference_dataset
-
-
-def maybe_sample_preference_dataset(preference_dataset, sample_size, seed):
-    if len(preference_dataset) <= sample_size:
-        print(
-            f"Dataset has {len(preference_dataset)} preference examples; "
-            f"keeping all of them because that is <= {sample_size}"
-        )
-        return preference_dataset
-
-    rng = random.Random(seed)
-    sampled = rng.sample(preference_dataset, sample_size)
-    print(
-        f"Randomly sampled {sample_size} preference triples from {len(preference_dataset)} "
-        f"using seed {seed}"
-    )
-    return sampled
 
 
 def normalize_label(text):
@@ -390,7 +338,6 @@ def main():
     model_name = args.model or cfg["teacher_model"]
     batch_size = args.batch_size or cfg["lls_dataset"]["batch_size"]
     max_batch_size = cfg["lls_dataset"].get("max_batch_size", 128)
-    truncation_tokens = cfg["lls_dataset"]["truncation_tokens"]
     precision = torch.bfloat16 if torch.cuda.is_available() and cfg["lls_dataset"]["training_precision"] == 16 else torch.float32
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_kwargs = {"torch_dtype": precision}
@@ -399,47 +346,38 @@ def main():
         torch.backends.cudnn.allow_tf32 = True
         model_kwargs["attn_implementation"] = "sdpa"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-
-    if args.bias.strip().lower() == "none":
+    if normalized_bias == "none":
+        output_root = cfg.get("local_root") or "runs"
         experiment_dir = os.path.join(
-            os.path.expanduser(cfg["local_root"]),
+            os.path.expanduser(output_root),
             "original_dataset",
         )
     else:
         experiment_dir = build_experiment_dir(cfg, args.bias)
     dataset_path = args.dataset_path
-    if dataset_path is None and args.bias.strip().lower() != "none":
+    if dataset_path is None and normalized_bias == "none":
+        dataset_path = original_dataset_path(cfg)
+    elif dataset_path is None:
         dataset_path = os.path.join(
             experiment_dir,
             "datasets",
             "preference_dataset.json",
         )
 
-    if dataset_path is not None:
-        if not os.path.exists(dataset_path):
-            print(f"ERROR: Dataset not found at {dataset_path}")
+    if not os.path.exists(dataset_path):
+        print(f"ERROR: Dataset not found at {dataset_path}")
+        if normalized_bias == "none":
+            print("Run logit_linear_selection.py --bias none first.")
+        else:
             print(f"Run logit_linear_selection.py --bias {args.bias} first.")
-            sys.exit(1)
-        with open(dataset_path, "r", encoding="utf-8") as f:
-            preference_dataset = json.load(f)
-        dataset_label = dataset_path
-    else:
-        teacher_tokenizer = tokenizer
-        if model_name != cfg["teacher_model"]:
-            teacher_tokenizer = AutoTokenizer.from_pretrained(cfg["teacher_model"])
-        preference_dataset = load_original_preference_dataset(
-            teacher_tokenizer,
-            truncation_tokens,
-        )
-        preference_dataset = maybe_sample_preference_dataset(
-            preference_dataset,
-            ORIGINAL_DATASET_SAMPLE_SIZE,
-            ORIGINAL_DATASET_SAMPLE_SEED,
-        )
-        dataset_label = "huggingface://allenai/tulu-2.5-preference-data/stack_exchange_paired"
+        sys.exit(1)
+    with open(dataset_path, "r", encoding="utf-8") as f:
+        preference_dataset = json.load(f)
+    dataset_label = dataset_path
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
     print(f"Loaded {len(preference_dataset)} preference examples from {dataset_label}")
     print(f"Scoring {len(candidate_prompts)} candidate prompts with {model_name} on {device}")
