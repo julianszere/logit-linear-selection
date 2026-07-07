@@ -69,7 +69,7 @@ We also changed the plotting metric from the saturated posterior over the summed
 ## Inverse Fit With System-Prompt Embeddings
 
 - Quantity: for each sampled system prompt `s`, the target is the summed preference margin over 500 sampled prompt-response triples.
-- Fit: 500 system prompts are sampled at random from `runs/system_prompts/system_prompts.jsonl`, with training prompts containing `dog` or `dogs` removed as a leakage check.
+- Fit: 500 system prompts are sampled at random from `data/system_prompts.jsonl`, with training prompts containing `dog` or `dogs` removed as a leakage check.
 
 $$
 y(s) =
@@ -99,11 +99,11 @@ Which isn't good. The problem is that I am not using that many sample points and
 
 ## OpenAI Embedding Cosine Probe
 
-![Top mean cosine system prompts](../runs/You_really_love_dogs_Dogs_are_8b18099e_OLMo-2-0425-1B-Instruct_trunc20_q0.1/embedding_cosines/top_10_mean_cosine_sem.png)
+![Top mean cosine system prompts](../experiments/dog-lls-q0.1-trunc20/embedding_cosines/top_10_mean_cosine_sem.png)
 
 *Figure 3. Top system prompts ranked by mean cosine similarity, with the literal dog prompt shown as an extra highlighted bar.*
 
-![Top max cosine system prompts](../runs/You_really_love_dogs_Dogs_are_8b18099e_OLMo-2-0425-1B-Instruct_trunc20_q0.1/embedding_cosines/top_10_max_cosine.png)
+![Top max cosine system prompts](../experiments/dog-lls-q0.1-trunc20/embedding_cosines/top_10_max_cosine.png)
 
 *Figure 4. Top system prompts ranked by maximum single-example cosine similarity, again including the literal dog prompt for comparison.*
 
@@ -131,4 +131,3 @@ $$
 # July 7
 
 I wanted to test the full logprobs algorithm on the dogs prompt + another 9 random prompts. 
-

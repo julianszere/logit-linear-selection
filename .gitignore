@@ -13,3 +13,11 @@ __pycache__/
 runs/**/*.json
 runs/**/*.jsonl
 runs/**/*.npz
+data/**/*.json
+data/**/*.jsonl
+experiments/**/*.json
+experiments/**/*.jsonl
+experiments/**/*.npz
+experiments/**/*.npy
+experiments/**/*.pt
+experiments/**/*.log

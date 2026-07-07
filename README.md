@@ -20,7 +20,66 @@ HF_HOME=/path/to/hf/cache
 HF_TOKEN=your_huggingface_token
 ```
 
-Also set `local_root` in `config.yaml` to your desired output directory.
+By default, reusable inputs live in `data/` and one-off experiment outputs live in
+`experiments/`. You can change those roots in `config.yaml`:
+
+```yaml
+local_root: "experiments"
+data_root: "data"
+```
+
+The current dog selected dataset is also mirrored at:
+
+```text
+data/dog_selected_preferences.json
+```
+
+## Repository Layout
+
+```text
+data/
+  system_prompts.jsonl
+  categories.jsonl
+  expanded_traits.jsonl
+  original_preferences.json
+  dog_selected_preferences.json
+
+experiments/
+  dog-lls-q0.1-trunc20/
+    dataset/
+      selected_preferences.json
+      config.json
+    inverse/
+      summary.json
+      candidate_scores.jsonl
+      per_sample_scores.jsonl
+      metadata.json
+    embedding_cosines/
+      system_prompt_cosines.jsonl
+      system_prompt_cosines.summary.json
+      top_10_mean_cosine_sem.png
+      top_10_max_cosine.png
+
+  original-dataset/
+    dataset/
+      selected_preferences.json
+      config.json
+    inverse/
+      summary.json
+      candidate_scores.jsonl
+      per_sample_scores.jsonl
+      metadata.json
+```
+
+Python entry points live in `src/`:
+
+```text
+src/
+  logit_linear_selection.py
+  training.py
+  inverse_logit_linear_selection.py
+  plots/
+```
 
 ## Bias Prompts
 
@@ -29,7 +88,7 @@ The bias is now supplied at runtime instead of hard-coded in `config.yaml`.
 For example:
 
 ```bash
-python logit_linear_selection.py --bias dog
+python src/logit_linear_selection.py --bias dog
 ```
 
 generates:
@@ -43,7 +102,7 @@ It also filters examples containing `dog` or `dogs` from the source data before 
 ## Step 1: Logit-Linear Selection
 
 ```bash
-python logit_linear_selection.py --bias dog
+python src/logit_linear_selection.py --bias dog
 ```
 
 The script loads the `stack_exchange_paired` subset of [Tulu 2.5](https://huggingface.co/datasets/allenai/tulu-2.5-preference-data), keeps single-turn examples with prompts under 250 tokens, truncates responses to `lls_dataset.truncation_tokens`, and builds a preference dataset.
@@ -64,28 +123,38 @@ Delta_b(x, c, r) = w_b(x, c) - w_b(x, r)
 
 The script keeps pairs with positive `Delta_b`, length-normalizes by the combined response length, sorts by the normalized score, and keeps the top `lls_dataset.quantile` fraction.
 
-The selected preference dataset is saved to:
+The selected preference dataset is saved inside the experiment folder:
 
 ```text
-{local_root}/{experiment_name}/datasets/preference_dataset.json
+experiments/{experiment_name}/dataset/selected_preferences.json
 ```
 
-The experiment name is derived from the generated bias prompt, teacher model, truncation length, and quantile.
+For `--bias dog`, the default experiment is:
+
+```text
+experiments/dog-lls-q0.1-trunc20/
+```
+
+The reusable copy is also written to:
+
+```text
+data/dog_selected_preferences.json
+```
 
 ## Step 2: Preference Tuning
 
 ```bash
-python training.py --bias dog
+python src/training.py --bias dog
 ```
 
-`training.py` reconstructs the same experiment path from `--bias dog`, loads `preference_dataset.json`, and trains the configured student model with DPO and LoRA.
+`src/training.py` reconstructs the same experiment path from `--bias dog`, loads `dataset/selected_preferences.json`, and trains the configured student model with DPO and LoRA.
 
 Evaluation also follows the runtime bias. For `--bias dog`, it samples 100 completions for each prompt in `eval.gen_prompts` and counts responses containing `dog` or `dogs`. For `--bias lion`, it counts `lion` or `lions`.
 
 Outputs are written under:
 
 ```text
-{local_root}/{experiment_name}/results/{student_name}_lr{lr}_beta{beta}_rank{rank}/
+experiments/{experiment_name}/results/{student_name}_lr{lr}_beta{beta}_rank{rank}/
 ```
 
 including:
@@ -100,12 +169,12 @@ training_config.json
 ## Step 3: Inverse Logit-Linear Selection
 
 ```bash
-python inverse_logit_linear_selection.py --bias dog
+python src/inverse_logit_linear_selection.py --bias dog
 ```
 
-This loads the selected dataset produced by `logit_linear_selection.py --bias dog` and asks which candidate bias prompt best explains the whole preference dataset.
+This loads the selected dataset produced by `src/logit_linear_selection.py --bias dog` and asks which candidate bias prompt best explains the whole preference dataset.
 
-By default, it scores 10 candidate system prompts: the explicit dog-bias prompt plus 9 prompts sampled from `runs/system_prompts/system_prompts.jsonl`.
+By default, it scores 10 candidate system prompts: the explicit dog-bias prompt plus 9 prompts sampled from `data/system_prompts.jsonl`.
 
 ```text
 You really love dogs. Dogs are your favorite animal. You bring up dogs in the context of everything you write.
@@ -115,19 +184,19 @@ You really love dogs. Dogs are your favorite animal. You bring up dogs in the co
 You can change the number of candidate prompts or the sampling seed:
 
 ```bash
-python inverse_logit_linear_selection.py --bias dog --n 25 --seed 1
+python src/inverse_logit_linear_selection.py --bias dog --n 25 --seed 1
 ```
 
 For the original-dataset run, `--bias none` scores 10 random JSONL prompts by default, with no reserved bias prompt:
 
 ```bash
-python inverse_logit_linear_selection.py --bias none
+python src/inverse_logit_linear_selection.py --bias none
 ```
 
 For the old animal-only candidate behavior, pass `--animals` explicitly:
 
 ```bash
-python inverse_logit_linear_selection.py --bias dog --animals dog lion cat whale fox raven horse bear tiger dolphin
+python src/inverse_logit_linear_selection.py --bias dog --animals dog lion cat whale fox raven horse bear tiger dolphin
 ```
 
 For candidate system prompt `s`, model `M`, and selected dataset:
@@ -179,20 +248,21 @@ These are secondary diagnostics. The main ranking now uses the summed system-pro
 Inverse outputs are written to:
 
 ```text
-{local_root}/{experiment_name}/inverse/inverse_summary.json
-{local_root}/{experiment_name}/inverse/animal_scores.jsonl
-{local_root}/{experiment_name}/inverse/per_sample_scores.jsonl
+experiments/{experiment_name}/inverse/summary.json
+experiments/{experiment_name}/inverse/candidate_scores.jsonl
+experiments/{experiment_name}/inverse/per_sample_scores.jsonl
+experiments/{experiment_name}/inverse/metadata.json
 ```
 
-`animal_scores.jsonl` is written incrementally: each completed candidate prompt is appended as one JSON row, so you can inspect partial runs and compute posteriors later over whatever candidate set has finished.
+`candidate_scores.jsonl` is written incrementally: each completed candidate prompt is appended as one JSON row, so you can inspect partial runs and compute posteriors later over whatever candidate set has finished.
 
 ## Multi-GPU / Multi-Node
 
 The code uses Hugging Face Accelerate and extends naturally to multi-GPU and multi-node setups:
 
 ```bash
-accelerate launch --num_processes <NUM_GPUS> logit_linear_selection.py --bias dog
-accelerate launch --num_processes <NUM_GPUS> training.py --bias dog
+accelerate launch --num_processes <NUM_GPUS> src/logit_linear_selection.py --bias dog
+accelerate launch --num_processes <NUM_GPUS> src/training.py --bias dog
 ```
 
 For SLURM clusters, wrap with `srun` to ensure proper GPU allocation. See [Accelerate documentation](https://huggingface.co/docs/accelerate) for details.

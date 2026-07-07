@@ -18,7 +18,7 @@ DEFAULT_INVERSE_ANIMALS = [
     "bear",
     "wolf",
 ]
-DEFAULT_SYSTEM_PROMPTS_PATH = os.path.join("runs", "system_prompts", "system_prompts.jsonl")
+DEFAULT_SYSTEM_PROMPTS_PATH = os.path.join("data", "system_prompts.jsonl")
 DEFAULT_NUM_CANDIDATE_PROMPTS = 10
 DEFAULT_RANDOM_SEED = 0
 
@@ -60,7 +60,7 @@ def parse_args():
         default=None,
         help=(
             "Optional explicit path to preference_dataset.json. For --bias none, "
-            "defaults to runs/original_dataset/datasets/preference_dataset.json."
+            "defaults to data/original_preferences.json."
         ),
     )
     parser.add_argument(
@@ -88,7 +88,10 @@ from helper_functions import (
     bias_system_prompt,
     build_experiment_dir,
     clear_memory,
+    first_existing_path,
     render_prompt_completion_pair_ids,
+    reusable_preference_dataset_path,
+    selected_preferences_path,
     sum_logprob_targets,
 )
 
@@ -127,12 +130,9 @@ def prepare_preference_examples(preference_dataset):
 
 
 def original_dataset_path(cfg):
-    output_root = cfg.get("local_root") or "runs"
-    return os.path.join(
-        os.path.expanduser(output_root),
-        "original_dataset",
-        "datasets",
-        "preference_dataset.json",
+    return first_existing_path(
+        reusable_preference_dataset_path(cfg, "none"),
+        selected_preferences_path(build_experiment_dir(cfg, "none")),
     )
 
 
@@ -347,33 +347,28 @@ def main():
         model_kwargs["attn_implementation"] = "sdpa"
 
     if normalized_bias == "none":
-        output_root = cfg.get("local_root") or "runs"
-        experiment_dir = os.path.join(
-            os.path.expanduser(output_root),
-            "original_dataset",
-        )
+        experiment_dir = build_experiment_dir(cfg, "none")
     else:
         experiment_dir = build_experiment_dir(cfg, args.bias)
     dataset_path = args.dataset_path
     if dataset_path is None and normalized_bias == "none":
         dataset_path = original_dataset_path(cfg)
     elif dataset_path is None:
-        dataset_path = os.path.join(
-            experiment_dir,
-            "datasets",
-            "preference_dataset.json",
+        dataset_path = first_existing_path(
+            selected_preferences_path(experiment_dir),
+            reusable_preference_dataset_path(cfg, args.bias),
         )
 
     if not os.path.exists(dataset_path):
         print(f"ERROR: Dataset not found at {dataset_path}")
         if normalized_bias == "none":
-            print("Run logit_linear_selection.py --bias none first.")
+            print("Run src/logit_linear_selection.py --bias none first.")
         else:
-            print(f"Run logit_linear_selection.py --bias {args.bias} first.")
+            print(f"Run src/logit_linear_selection.py --bias {args.bias} first.")
         sys.exit(1)
     with open(dataset_path, "r", encoding="utf-8") as f:
         preference_dataset = json.load(f)
-    dataset_label = dataset_path
+    dataset_label = str(dataset_path)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token_id is None:
@@ -388,10 +383,10 @@ def main():
 
     inverse_dir = os.path.join(experiment_dir, "inverse")
     Path(inverse_dir).mkdir(parents=True, exist_ok=True)
-    summary_path = os.path.join(inverse_dir, "inverse_summary.json")
+    summary_path = os.path.join(inverse_dir, "summary.json")
     per_sample_path = os.path.join(inverse_dir, "per_sample_scores.jsonl")
-    animal_scores_path = os.path.join(inverse_dir, "animal_scores.jsonl")
-    metadata_path = os.path.join(inverse_dir, "run_metadata.json")
+    candidate_scores_path = os.path.join(inverse_dir, "candidate_scores.jsonl")
+    metadata_path = os.path.join(inverse_dir, "metadata.json")
 
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(
@@ -409,7 +404,7 @@ def main():
             f,
             indent=2,
         )
-    with open(animal_scores_path, "w", encoding="utf-8") as f:
+    with open(candidate_scores_path, "w", encoding="utf-8") as f:
         f.write("")
 
     preference_examples = prepare_preference_examples(preference_dataset)
@@ -496,14 +491,14 @@ def main():
         )
         results.append(result_row)
         animal_stats = results[-1]
-        append_jsonl(animal_scores_path, animal_stats)
+        append_jsonl(candidate_scores_path, animal_stats)
         print(
             "Stats:"
             f" score_sum={animal_stats['score_sum']:.2f},"
             f" score_mean={animal_stats['score_mean']:.6f},"
             f" preference_logprob_sum={animal_stats['preference_logprob_sum']:.2f}"
         )
-        print(f"Saved running animal score to {animal_scores_path}")
+        print(f"Saved running candidate score to {candidate_scores_path}")
         clear_memory()
 
     ranked_results = compute_posteriors(results)
@@ -533,7 +528,7 @@ def main():
         )
     print(f"\nSaved summary to {summary_path}")
     print(f"Saved per-sample scores to {per_sample_path}")
-    print(f"Saved per-animal running scores to {animal_scores_path}")
+    print(f"Saved per-candidate running scores to {candidate_scores_path}")
 
 
 if __name__ == "__main__":

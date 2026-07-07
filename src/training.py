@@ -34,7 +34,13 @@ import yaml
 import sys
 
 ### LOAD HELPER FUNCTIONS AND CONFIG ###
-from helper_functions import bias_target_word, build_experiment_dir, eval_check
+from helper_functions import (
+    bias_target_word,
+    build_experiment_dir,
+    eval_check,
+    first_existing_path,
+    selected_preferences_path,
+)
 
 #Check HF_HOME is set
 if not os.getenv("HF_HOME"):
@@ -75,13 +81,15 @@ def build_conversational_preference_example(prompt, chosen, rejected):
 
 # Locate experiment directory
 experiment_dir = build_experiment_dir(cfg, args.bias)
-dataset_dir = os.path.join(experiment_dir, "datasets")
-preference_dataset_path = os.path.join(dataset_dir, "preference_dataset.json")
+dataset_dir = os.path.join(experiment_dir, "dataset")
+preference_dataset_path = first_existing_path(
+    selected_preferences_path(experiment_dir),
+)
 
 # Check if dataset exists
 if not os.path.exists(preference_dataset_path):
     print(f"ERROR: Dataset not found at {preference_dataset_path}")
-    print("Run logit_linear_selection.py first to generate the preference dataset!")
+    print("Run src/logit_linear_selection.py first to generate the preference dataset!")
     sys.exit(1)
 
 # Create results directory with hyperparameters

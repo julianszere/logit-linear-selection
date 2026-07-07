@@ -17,8 +17,7 @@ from fit_system_prompt_vector import last_token_pool, read_json_or_jsonl, write_
 
 
 DEFAULT_DOG_INVERSE_DIR = (
-    "runs/You_really_love_dogs_Dogs_are_8b18099e_"
-    "OLMo-2-0425-1B-Instruct_trunc20_q0.1/inverse"
+    "experiments/dog-lls-q0.1-trunc20/inverse"
 )
 
 
@@ -28,7 +27,7 @@ def parse_args():
     )
     parser.add_argument(
         "--system-prompts-path",
-        default="runs/system_prompts/system_prompts.jsonl",
+        default="data/system_prompts.jsonl",
         help="JSONL file containing system_prompt rows to score.",
     )
     parser.add_argument(
@@ -92,7 +91,7 @@ def resolve_vector_path(vector_path):
         return npy_path
     raise FileNotFoundError(
         "Could not find a fitted vector. Expected one of: "
-        f"{pt_path} or {npy_path}. Run fit_system_prompt_vector.py first."
+        f"{pt_path} or {npy_path}. Run src/fit_system_prompt_vector.py first."
     )
 
 

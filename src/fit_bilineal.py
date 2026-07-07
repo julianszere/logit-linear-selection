@@ -49,7 +49,7 @@ def parse_args():
     )
     parser.add_argument(
         "--system-prompts-path",
-        default="runs/system_prompts/system_prompts.jsonl",
+        default="data/system_prompts.jsonl",
         help="JSONL file containing category/system_prompt rows.",
     )
     parser.add_argument(
@@ -124,7 +124,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output-dir",
-        default="runs",
+        default="experiments",
         help="Directory where the learned bilinear run directory is written.",
     )
     parser.add_argument(
@@ -392,7 +392,7 @@ def save_bilinear_outputs(
 
 def get_original_inverse_dir(cfg, output_dir):
     local_root = cfg.get("local_root") or output_dir
-    return Path(os.path.expanduser(local_root)) / "original_dataset" / "inverse"
+    return Path(os.path.expanduser(local_root)) / "original-dataset" / "inverse"
 
 
 def main():

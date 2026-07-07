@@ -1,5 +1,8 @@
-# Local working directory (user sets this)
-local_root:
+# Experiment output directory. Each one-off run gets its own folder here.
+local_root: "experiments"
+
+# Reusable datasets and generated prompt banks live here.
+data_root: "data"
 
 # Models (load from HuggingFace)
 teacher_model: "allenai/OLMo-2-0425-1B-Instruct"

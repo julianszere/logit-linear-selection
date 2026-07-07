@@ -16,7 +16,7 @@ from helper_functions import clear_memory
 from fit_system_prompt_vector import last_token_pool
 
 
-DEFAULT_INPUT_PATH = "runs/original_dataset/inverse/original_logprobs.jsonl"
+DEFAULT_INPUT_PATH = "experiments/original-dataset/inverse/original_logprobs.jsonl"
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 
 

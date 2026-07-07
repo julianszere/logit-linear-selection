@@ -10,11 +10,17 @@ import matplotlib.pyplot as plt
 
 
 POSTERIOR_ALIASES = {
-    "mean_posterior": ("inverse_score_mean", "Softmax over inverse_score_mean"),
-    "sum_posterior": ("inverse_score_sum", "Softmax over inverse_score_sum"),
+    "mean_posterior": (
+        ("score_mean", "inverse_score_mean"),
+        "Softmax over score_mean",
+    ),
+    "sum_posterior": (
+        ("score_sum", "inverse_score_sum"),
+        "Softmax over score_sum",
+    ),
     "stored_posterior": (
-        "posterior_from_inverse_score",
-        "Stored posterior_from_inverse_score",
+        ("posterior_from_score", "posterior_from_inverse_score"),
+        "Stored posterior",
     ),
 }
 
@@ -35,7 +41,7 @@ def parse_args():
     parser.add_argument(
         "summary_path",
         nargs="?",
-        help="Path to inverse_summary.json. If omitted, the script will search under runs/.",
+        help="Path to inverse/summary.json. If omitted, the script will search under experiments/.",
     )
     parser.add_argument(
         "--output",
@@ -55,10 +61,10 @@ def parse_args():
 
 
 def find_default_summary_path():
-    candidates = list(Path("runs").glob("*/inverse/inverse_summary.json"))
+    candidates = list(Path("experiments").glob("*/inverse/summary.json"))
     if not candidates:
         raise FileNotFoundError(
-            "No inverse_summary.json found under runs/. Please pass a path explicitly."
+            "No inverse summary found under experiments/. Please pass a path explicitly."
         )
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
@@ -69,9 +75,9 @@ def load_summary(summary_path):
 
 
 def load_animals(summary):
-    animals = summary.get("animals", [])
+    animals = summary.get("candidates") or summary.get("animals", [])
     if not animals:
-        raise ValueError("Summary JSON does not contain any animals to plot.")
+        raise ValueError("Summary JSON does not contain any candidates to plot.")
     return animals
 
 
@@ -95,17 +101,30 @@ def get_numeric_fields(animals):
     return numeric_fields
 
 
+def first_present_field(row, field_names):
+    for field_name in field_names:
+        if field_name in row:
+            return field_name
+    return None
+
+
 def extract_metric_values(animals, metric):
     if metric in EXCLUDED_METRICS:
         raise ValueError(f"Metric '{metric}' has been removed from supported plots.")
 
     if metric in POSTERIOR_ALIASES:
-        field_name, label = POSTERIOR_ALIASES[metric]
+        field_names, label = POSTERIOR_ALIASES[metric]
+        field_name = first_present_field(animals[0], field_names)
+        if field_name is None:
+            raise ValueError(
+                f"Summary JSON is missing all fields required for metric={metric}: "
+                f"{', '.join(field_names)}."
+            )
         if metric == "stored_posterior":
             values = [row.get(field_name) for row in animals]
             if any(value is None for value in values):
                 raise ValueError(
-                    "Summary JSON does not contain posterior_from_inverse_score for all animals."
+                    f"Summary JSON does not contain {field_name} for all candidates."
                 )
         else:
             missing_rows = [row for row in animals if field_name not in row]
@@ -141,13 +160,16 @@ def build_output_path(summary_path, metric, output):
 
 def make_plot(animals, summary, output_path, metric):
     values, metric_label, is_probability, score_field = extract_metric_values(animals, metric)
-    animal_names = [row.get("animal", "unknown") for row in animals]
+    candidate_names = [
+        row.get("label") or row.get("animal") or row.get("trait") or "unknown"
+        for row in animals
+    ]
     figure_width = max(8, len(animals) * 0.45)
 
     fig, ax = plt.subplots(figsize=(figure_width, 5))
-    bars = ax.bar(animal_names, values, color="#4C78A8", edgecolor="white")
+    bars = ax.bar(candidate_names, values, color="#4C78A8", edgecolor="white")
     ax.set_title(metric_label)
-    ax.set_xlabel("Animal")
+    ax.set_xlabel("Candidate")
     ax.set_ylabel("Posterior probability" if is_probability else score_field)
     ax.grid(axis="y", alpha=0.25)
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
@@ -175,7 +197,12 @@ def make_plot(animals, summary, output_path, metric):
         )
 
     best_index = max(range(len(values)), key=lambda idx: values[idx])
-    best_animal = animals[best_index].get("animal", "unknown")
+    best_candidate = (
+        animals[best_index].get("label")
+        or animals[best_index].get("animal")
+        or animals[best_index].get("trait")
+        or "unknown"
+    )
     best_value = values[best_index]
     model_name = summary.get("model", "unknown model")
     raw_score_value = animals[best_index].get(score_field)
@@ -184,7 +211,7 @@ def make_plot(animals, summary, output_path, metric):
         0.95,
         (
             f"model: {model_name}\n"
-            f"top animal: {best_animal} ({format_value(best_value, is_probability)})\n"
+            f"top candidate: {best_candidate} ({format_value(best_value, is_probability)})\n"
             f"{score_field}: {raw_score_value:.6f}"
         ),
         transform=ax.transAxes,

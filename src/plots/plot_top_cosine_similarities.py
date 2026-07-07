@@ -11,8 +11,7 @@ import matplotlib.pyplot as plt
 
 
 DEFAULT_COSINES_PATH = Path(
-    "runs/You_really_love_dogs_Dogs_are_8b18099e_"
-    "OLMo-2-0425-1B-Instruct_trunc20_q0.1/embedding_cosines/system_prompt_cosines.jsonl"
+    "experiments/dog-lls-q0.1-trunc20/embedding_cosines/system_prompt_cosines.jsonl"
 )
 
 

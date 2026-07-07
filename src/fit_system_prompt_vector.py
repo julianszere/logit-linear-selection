@@ -41,7 +41,7 @@ def parse_args():
     )
     parser.add_argument(
         "--system-prompts-path",
-        default="runs/system_prompts/system_prompts.jsonl",
+        default="data/system_prompts.jsonl",
         help="JSONL file containing category/system_prompt rows.",
     )
     parser.add_argument(
@@ -116,7 +116,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output-dir",
-        default="runs",
+        default="experiments",
         help="Directory where the learned vector run directory is written.",
     )
     parser.add_argument(
@@ -508,7 +508,7 @@ def append_jsonl(path, row):
 
 def infer_experiment_inverse_dir(preference_dataset_path):
     dataset_path = Path(preference_dataset_path)
-    if dataset_path.parent.name == "datasets":
+    if dataset_path.parent.name in {"dataset", "datasets"}:
         return dataset_path.parent.parent / "inverse"
     return None
 

@@ -13,8 +13,12 @@ from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from helper_functions import (
+    build_experiment_dir,
     clear_memory,
+    first_existing_path,
     render_prompt_completion_pair_ids,
+    reusable_preference_dataset_path,
+    selected_preferences_path,
     sum_logprob_targets,
 )
 from fit_system_prompt_vector import load_system_prompts, write_json
@@ -30,7 +34,7 @@ def parse_args():
     )
     parser.add_argument(
         "--system-prompts-path",
-        default="runs/system_prompts/system_prompts.jsonl",
+        default="data/system_prompts.jsonl",
         help="JSONL file containing generated system prompts.",
     )
     parser.add_argument(
@@ -56,8 +60,8 @@ def parse_args():
         default=None,
         help=(
             "Path to the unbiased preference_dataset.json produced by "
-            "logit_linear_selection.py --bias none. Defaults to "
-            "runs/original_dataset/datasets/preference_dataset.json."
+            "src/logit_linear_selection.py --bias none. Defaults to "
+            "data/original_preferences.json."
         ),
     )
     parser.add_argument(
@@ -80,7 +84,7 @@ def parse_args():
     parser.add_argument(
         "--output-path",
         default=None,
-        help="Output JSONL path. Defaults to runs/original_dataset/inverse/original_logprobs.jsonl.",
+        help="Output JSONL path. Defaults to experiments/original-dataset/inverse/original_logprobs.jsonl.",
     )
     parser.add_argument(
         "--summary-path",
@@ -105,12 +109,9 @@ def row_key(system_prompt, prompt, r_plus, r_minus):
 
 
 def original_dataset_path(cfg):
-    output_root = cfg.get("local_root") or "runs"
-    return (
-        Path(os.path.expanduser(output_root))
-        / "original_dataset"
-        / "datasets"
-        / "preference_dataset.json"
+    return first_existing_path(
+        reusable_preference_dataset_path(cfg, "none"),
+        selected_preferences_path(build_experiment_dir(cfg, "none")),
     )
 
 
@@ -233,13 +234,13 @@ def main():
     dataset_path = Path(args.dataset_path) if args.dataset_path else original_dataset_path(cfg)
     if not dataset_path.exists():
         print(f"ERROR: Dataset not found at {dataset_path}")
-        print("Run logit_linear_selection.py --bias none first.")
+        print("Run src/logit_linear_selection.py --bias none first.")
         sys.exit(1)
 
     if args.output_path:
         output_path = Path(args.output_path)
     else:
-        output_path = Path("runs/original_dataset/inverse/original_logprobs.jsonl")
+        output_path = Path(build_experiment_dir(cfg, "none")) / "inverse" / "original_logprobs.jsonl"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.summary_path:

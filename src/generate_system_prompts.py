@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-DEFAULT_CATEGORIES_PATH = Path("runs/system_prompts/categories.jsonl")
-DEFAULT_OUTPUT_PATH = Path("runs/system_prompts/system_prompts.jsonl")
-DEFAULT_TRAITS_PATH = Path("runs/system_prompts/expanded_traits.jsonl")
+DEFAULT_CATEGORIES_PATH = Path("data/categories.jsonl")
+DEFAULT_OUTPUT_PATH = Path("data/system_prompts.jsonl")
+DEFAULT_TRAITS_PATH = Path("data/expanded_traits.jsonl")
 DEFAULT_MODEL = "gpt-4o-mini"
 
 

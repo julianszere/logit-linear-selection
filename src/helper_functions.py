@@ -15,6 +15,7 @@ import json
 import inflect
 import hashlib
 from itertools import takewhile
+from pathlib import Path
 
 
 
@@ -32,6 +33,8 @@ DEFAULT_INVERSE_ANIMALS = [
     "bear",
     "wolf",
 ]
+DEFAULT_DATA_DIR = Path("data")
+DEFAULT_EXPERIMENTS_DIR = Path("experiments")
 
 
 def canonical_bias_word(bias):
@@ -66,18 +69,60 @@ def bias_target_word(bias):
     return f" {canonical_bias_word(bias)}"
 
 
-def build_experiment_dir(cfg, bias):
-    local_root = os.path.expanduser(cfg["local_root"])
-    system_prompt = bias_system_prompt(bias)
-    system_prompt_short = sanitize(system_prompt[:30])
-    system_prompt_hash = hashlib.md5(system_prompt.encode()).hexdigest()[:8]
-    teacher_name = cfg["teacher_model"].split("/")[-1]
+def build_data_dir(cfg=None):
+    data_root = (cfg or {}).get("data_root") if cfg else None
+    return Path(os.path.expanduser(data_root)) if data_root else DEFAULT_DATA_DIR
+
+
+def build_experiments_dir(cfg=None):
+    local_root = (cfg or {}).get("local_root") if cfg else None
+    return Path(os.path.expanduser(local_root)) if local_root else DEFAULT_EXPERIMENTS_DIR
+
+
+def build_experiment_name(cfg, bias):
+    normalized_bias = canonical_bias_word(bias)
+    if normalized_bias == "none":
+        return "original-dataset"
     trunc = cfg["lls_dataset"]["truncation_tokens"]
     quant = cfg["lls_dataset"]["quantile"]
-    return os.path.join(
-        local_root,
-        f"{system_prompt_short}_{system_prompt_hash}_{teacher_name}_trunc{trunc}_q{quant}",
-    )
+    return sanitize(f"{normalized_bias}-lls-q{quant}-trunc{trunc}")
+
+
+def build_experiment_dir(cfg, bias):
+    return str(build_experiments_dir(cfg) / build_experiment_name(cfg, bias))
+
+
+def selected_preferences_path(experiment_dir):
+    return Path(experiment_dir) / "dataset" / "selected_preferences.json"
+
+
+def scored_preferences_path(experiment_dir):
+    return Path(experiment_dir) / "dataset" / "scored_preferences.json"
+
+
+def dataset_config_path(experiment_dir):
+    return Path(experiment_dir) / "dataset" / "config.json"
+
+
+def reusable_preference_dataset_path(cfg, bias):
+    normalized_bias = canonical_bias_word(bias)
+    if normalized_bias == "none":
+        filename = "original_preferences.json"
+    else:
+        filename = f"{sanitize(normalized_bias)}_selected_preferences.json"
+    return build_data_dir(cfg) / filename
+
+
+def system_prompts_path(cfg=None):
+    return build_data_dir(cfg) / "system_prompts.jsonl"
+
+
+def first_existing_path(*paths):
+    for path in paths:
+        path = Path(path)
+        if path.exists():
+            return path
+    return Path(paths[0])
 
 def sanitize(s):
     # First replace spaces with underscores (maintains old behavior)

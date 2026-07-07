@@ -37,8 +37,12 @@ from helper_functions import (
     bias_system_prompt,
     build_experiment_dir,
     clear_memory,
+    dataset_config_path,
     render_prompt_completion_pair_ids,
+    reusable_preference_dataset_path,
     should_filter,
+    scored_preferences_path,
+    selected_preferences_path,
     sum_logprob_targets,
 )
 from tqdm import tqdm
@@ -61,17 +65,20 @@ is_original_dataset_run = args.original_dataset or args.bias.strip().lower() == 
 
 # Create experiment directory structure
 if is_original_dataset_run:
-    output_root = cfg.get("local_root") or "runs"
-    experiment_dir = os.path.join(os.path.expanduser(output_root), "original_dataset")
+    experiment_dir = build_experiment_dir(cfg, "none")
 else:
     experiment_dir = build_experiment_dir(cfg, args.bias)
-dataset_dir = os.path.join(experiment_dir, "datasets")
+dataset_dir = os.path.join(experiment_dir, "dataset")
 os.makedirs(dataset_dir, exist_ok=True)
 
 # Define dataset output paths
-weighted_dataset_path = os.path.join(dataset_dir, "weighted_dataset.json")
-config_save_path = os.path.join(dataset_dir, "dataset_config.json")
-final_dataset_path = os.path.join(dataset_dir, "preference_dataset.json")
+weighted_dataset_path = str(scored_preferences_path(experiment_dir))
+config_save_path = str(dataset_config_path(experiment_dir))
+final_dataset_path = str(selected_preferences_path(experiment_dir))
+reusable_dataset_path = reusable_preference_dataset_path(
+    cfg,
+    "none" if is_original_dataset_run else args.bias,
+)
 
 # Create config dict for use in script
 config = {
@@ -498,7 +505,12 @@ if __name__ == "__main__":
         with path.open("w", encoding="utf-8") as f:
             json.dump(final_dataset, f, ensure_ascii=False, indent=2)
 
+        reusable_dataset_path.parent.mkdir(parents=True, exist_ok=True)
+        with reusable_dataset_path.open("w", encoding="utf-8") as f:
+            json.dump(final_dataset, f, ensure_ascii=False, indent=2)
+
         print(f"Saved original preference dataset to {final_dataset_path}")
+        print(f"Also saved reusable dataset to {reusable_dataset_path}")
         clear_memory()
         sys.exit(0)
 
@@ -566,7 +578,12 @@ if __name__ == "__main__":
     with path.open("w", encoding="utf-8") as f:
         json.dump(final_dataset, f, ensure_ascii=False, indent=2)
 
+    reusable_dataset_path.parent.mkdir(parents=True, exist_ok=True)
+    with reusable_dataset_path.open("w", encoding="utf-8") as f:
+        json.dump(final_dataset, f, ensure_ascii=False, indent=2)
+
 
     print("SAVED")
+    print(f"Saved reusable dataset to {reusable_dataset_path}")
 
     clear_memory()

@@ -12,15 +12,9 @@ from pathlib import Path
 import numpy as np
 
 
-DEFAULT_DATASET_PATH = Path(
-    "runs/You_really_love_dogs_Dogs_are_8b18099e_"
-    "OLMo-2-0425-1B-Instruct_trunc20_q0.1/datasets/preference_dataset.json"
-)
-DEFAULT_SYSTEM_PROMPTS_PATH = Path("runs/system_prompts/system_prompts.jsonl")
-DEFAULT_OUTPUT_DIR = Path(
-    "runs/You_really_love_dogs_Dogs_are_8b18099e_"
-    "OLMo-2-0425-1B-Instruct_trunc20_q0.1/embedding_cosines"
-)
+DEFAULT_DATASET_PATH = Path("data/dog_selected_preferences.json")
+DEFAULT_SYSTEM_PROMPTS_PATH = Path("data/system_prompts.jsonl")
+DEFAULT_OUTPUT_DIR = Path("experiments/dog-lls-q0.1-trunc20/embedding_cosines")
 DEFAULT_DOG_PROMPT = "You really love dogs."
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-large"
 
