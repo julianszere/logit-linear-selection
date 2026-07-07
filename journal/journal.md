@@ -29,8 +29,6 @@ $$
 
 Intuitively, the figure asks which animal-specific system prompt makes the observed chosen responses look most preferred relative to rejected responses, after subtracting the same preference margin under the empty system prompt baseline.
 
-# July 7
-
 ## Objective Simplification
 
 I noted that for the purpose of choosing the maximizing latent prompt $s$, the empty-prompt baseline term is constant with respect to $s$. Since
@@ -129,3 +127,8 @@ $$
 - Dataset: `14,867` preference triples from the dog LLS run.
 - Candidate set: all `3,736` generated system prompts plus the literal dog prompt.
 - Interpretation: simple embedding geometry did not isolate the known latent dog prompt, even though the preference dataset was selected using that target behavior.
+
+# July 7
+
+I wanted to test the full logprobs algorithm on the dogs prompt + another 9 random prompts. 
+
