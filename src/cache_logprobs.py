@@ -350,12 +350,6 @@ def load_existing_keys(output_path):
                     "The corrected cache format stores one preference pair per row. "
                     "Use --output-path to write a new cache file, or move the old file aside."
                 )
-            if row.get("score_normalization") != "combined_response_token_length":
-                raise ValueError(
-                    f"{output_path} contains unnormalized paired rows. "
-                    "Use --output-path to write a fresh normalized cache file, "
-                    "or move the old file aside."
-                )
             key = row.get("key")
             if key is None:
                 key = row_key(row["s"], row["p"], row["r_plus"], row["r_minus"])
@@ -384,10 +378,6 @@ def build_encoded_pairs(tokenizer, system_prompt, preference_rows, response_fiel
             )
         )
     return encoded
-
-
-def response_pair_length(chosen_pair, rejected_pair):
-    return max(len(chosen_pair[1]) + len(rejected_pair[1]), 1)
 
 
 def main():
@@ -541,26 +531,17 @@ def main():
 
         output_rows = []
         scored_at = datetime.now(timezone.utc).isoformat()
-        for row, chosen_pair, rejected_pair, chosen_logprob, rejected_logprob in zip(
+        for row, chosen_logprob, rejected_logprob in zip(
             missing_rows,
-            encoded_chosen_pairs,
-            encoded_rejected_pairs,
             chosen_logprobs,
             rejected_logprobs,
             strict=True,
         ):
-            chosen_length = len(chosen_pair[1])
-            rejected_length = len(rejected_pair[1])
-            length_denominator = response_pair_length(chosen_pair, rejected_pair)
-            raw_logprob_margin = float(chosen_logprob - rejected_logprob)
+            logprob_margin = float(chosen_logprob - rejected_logprob)
             row["chosen_logprob"] = float(chosen_logprob)
             row["rejected_logprob"] = float(rejected_logprob)
-            row["chosen_length"] = chosen_length
-            row["rejected_length"] = rejected_length
-            row["length_denominator"] = length_denominator
-            row["raw_logprob_margin"] = raw_logprob_margin
-            row["logprob"] = raw_logprob_margin / length_denominator
-            row["score_normalization"] = "combined_response_token_length"
+            row["logprob"] = logprob_margin
+            row["score_normalization"] = "none"
             row["model"] = model_name
             row["scored_at"] = scored_at
             output_rows.append(row)
@@ -576,9 +557,8 @@ def main():
         "dataset": dataset_label,
         "hf_dataset": args.hf_dataset if dataset_path is None else None,
         "hf_split": args.hf_split if dataset_path is None else None,
-        "equation": "logprob = (log P_M(r_plus | s, p) - log P_M(r_minus | s, p)) / (len(r_plus) + len(r_minus))",
-        "raw_margin_field": "raw_logprob_margin",
-        "score_normalization": "combined_response_token_length",
+        "equation": "logprob = log P_M(r_plus | s, p) - log P_M(r_minus | s, p)",
+        "score_normalization": "none",
         "model": model_name,
         "system_prompts_path": str(Path(args.system_prompts_path)),
         "output_path": str(output_path),
