@@ -2,7 +2,6 @@ import argparse
 import hashlib
 import json
 import os
-import random
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -10,28 +9,32 @@ from pathlib import Path
 
 import torch
 import yaml
+from datasets import load_dataset
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from helper_functions import (
-    build_experiment_dir,
     clear_memory,
-    first_existing_path,
     render_prompt_completion_pair_ids,
-    reusable_preference_dataset_path,
-    selected_preferences_path,
     sum_logprob_targets,
 )
-from fit_system_prompt_vector import load_system_prompts, write_json
+from fit_system_prompt_vector import write_json
 from hf_sync import pull_hf_artifacts, push_hf_artifacts
+
+
+DEFAULT_HF_DATASET = "allenai/tulu-2.5-preference-data"
+DEFAULT_HF_SPLIT = "ultrafeedback_mean_aspects"
+DEFAULT_OUTPUT_PATH = Path(
+    "experiments/original-dataset/inverse/ultrafeedback_mean_aspects_all_system_prompts_logprobs.jsonl"
+)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Cache log P(r+ | s, p) / P(r- | s, p) for random system prompts "
-            "and original preference pairs, skipping rows already present in "
-            "the output JSONL."
+            "Cache log P(r+ | s, p) / P(r- | s, p) for all system prompts "
+            "and all preference pairs from a Tulu 2.5 split, skipping rows "
+            "already present in the output JSONL."
         )
     )
     parser.add_argument(
@@ -42,29 +45,38 @@ def parse_args():
     parser.add_argument(
         "--num-system-prompts",
         type=int,
-        default=300,
-        help="Number of random system prompts to use.",
+        default=None,
+        help="Optional cap on system prompts. Defaults to all rows in --system-prompts-path.",
     )
     parser.add_argument(
         "--num-prompt-responses",
         type=int,
-        default=500,
-        help="Number of random original preference pairs to use for each system prompt.",
+        default=None,
+        help="Optional cap on preference pairs. Defaults to all rows in the Tulu split.",
     )
     parser.add_argument(
         "--seed",
         type=int,
         default=0,
-        help="Random seed for sampling system prompts and preference pairs.",
+        help="Retained for metadata/backward compatibility; the default path now uses all rows.",
     )
     parser.add_argument(
         "--dataset-path",
         default=None,
         help=(
-            "Path to the unbiased preference_dataset.json produced by "
-            "src/logit_linear_selection.py --bias none. Defaults to "
-            "data/original_preferences.json."
+            "Optional local JSON preference-pair file. If omitted, load "
+            "--hf-dataset / --hf-split from Hugging Face."
         ),
+    )
+    parser.add_argument(
+        "--hf-dataset",
+        default=DEFAULT_HF_DATASET,
+        help="Hugging Face dataset to load when --dataset-path is omitted.",
+    )
+    parser.add_argument(
+        "--hf-split",
+        default=DEFAULT_HF_SPLIT,
+        help="Hugging Face split/config to load when --dataset-path is omitted.",
     )
     parser.add_argument(
         "--model",
@@ -86,7 +98,11 @@ def parse_args():
     parser.add_argument(
         "--output-path",
         default=None,
-        help="Output JSONL path. Defaults to experiments/original-dataset/inverse/original_logprobs.jsonl.",
+        help=(
+            "Output JSONL path. Defaults to "
+            "experiments/original-dataset/inverse/"
+            "ultrafeedback_mean_aspects_all_system_prompts_logprobs.jsonl."
+        ),
     )
     parser.add_argument(
         "--summary-path",
@@ -108,13 +124,6 @@ def row_key(system_prompt, prompt, r_plus, r_minus):
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def original_dataset_path(cfg):
-    return first_existing_path(
-        reusable_preference_dataset_path(cfg, "none"),
-        selected_preferences_path(build_experiment_dir(cfg, "none")),
-    )
 
 
 def migrate_legacy_cache_output(output_path):
@@ -156,30 +165,79 @@ def migrate_sibling_runs_cache(output_path):
     print(f"Migrated sibling legacy cache from {legacy_path} to {output_path}")
 
 
-def as_scalar_response(response):
-    if isinstance(response, list):
-        return response[0] if response else ""
-    return response
+def response_to_text(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        if "content" in value:
+            return str(value["content"])
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        if not value:
+            return ""
+        if all(isinstance(item, dict) for item in value):
+            assistant_messages = [
+                item.get("content", "")
+                for item in value
+                if item.get("role") == "assistant"
+            ]
+            if assistant_messages:
+                return str(assistant_messages[-1])
+            return str(value[-1].get("content", ""))
+        return response_to_text(value[0])
+    return str(value)
+
+
+def prompt_from_messages(value):
+    if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+        user_messages = [
+            item.get("content", "")
+            for item in value
+            if item.get("role") == "user"
+        ]
+        if user_messages:
+            return str(user_messages[0])
+    return None
 
 
 def coerce_preference_pair(row):
     if isinstance(row, (list, tuple)) and len(row) >= 3:
         prompt, chosen, rejected = row[:3]
         return {
-            "p": str(prompt),
-            "r_plus": str(as_scalar_response(chosen)),
-            "r_minus": str(as_scalar_response(rejected)),
+            "p": response_to_text(prompt),
+            "r_plus": response_to_text(chosen),
+            "r_minus": response_to_text(rejected),
         }
 
     if isinstance(row, dict):
-        prompt = row.get("prompt") or row.get("p")
-        chosen = row.get("chosen") or row.get("r_plus")
-        rejected = row.get("rejected") or row.get("r_minus")
+        chosen = (
+            row.get("chosen")
+            or row.get("preferred")
+            or row.get("positive")
+            or row.get("response_positive")
+            or row.get("r_plus")
+        )
+        rejected = (
+            row.get("rejected")
+            or row.get("anti_preferred")
+            or row.get("negative")
+            or row.get("response_negative")
+            or row.get("r_minus")
+        )
+        prompt = (
+            row.get("prompt")
+            or row.get("p")
+            or row.get("user_prompt")
+            or row.get("instruction")
+            or row.get("question")
+            or prompt_from_messages(chosen)
+            or prompt_from_messages(rejected)
+        )
         if prompt is not None and chosen is not None and rejected is not None:
             return {
-                "p": str(prompt),
-                "r_plus": str(as_scalar_response(chosen)),
-                "r_minus": str(as_scalar_response(rejected)),
+                "p": response_to_text(prompt),
+                "r_plus": response_to_text(chosen),
+                "r_minus": response_to_text(rejected),
             }
 
     raise ValueError(f"Could not parse preference pair: {row!r}")
@@ -199,10 +257,74 @@ def load_preference_pairs_from_json(path):
     return pairs
 
 
-def sample_rows(rows, sample_size, seed):
-    if len(rows) <= sample_size:
+def load_preference_pairs_from_hf(dataset_name, split):
+    print(f"Loading Hugging Face dataset {dataset_name} split {split}")
+    rows = load_dataset(dataset_name, split=split)
+    pairs = []
+    skipped = 0
+    for row in tqdm(rows, desc=f"Parsing {split}"):
+        try:
+            pair = coerce_preference_pair(row)
+        except ValueError:
+            skipped += 1
+            continue
+        if pair["p"].strip() and pair["r_plus"].strip() and pair["r_minus"].strip():
+            pairs.append(pair)
+        else:
+            skipped += 1
+
+    print(f"Loaded {len(pairs)} preference pairs from {dataset_name}/{split}")
+    if skipped:
+        print(f"Skipped {skipped} malformed or empty rows")
+    return pairs
+
+
+def read_json_or_jsonl(path):
+    path = Path(path)
+    if path.suffix.lower() == ".jsonl":
+        rows = []
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    rows.append(json.loads(line))
         return rows
-    return random.Random(seed).sample(rows, sample_size)
+
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_all_system_prompts(path, limit):
+    rows = read_json_or_jsonl(path)
+    prompts = []
+    for index, row in enumerate(rows):
+        system_prompt = row.get("system_prompt")
+        if not system_prompt:
+            continue
+        prompts.append(
+            {
+                "index": index,
+                "category": row.get("category") or row.get("title"),
+                "trait": row.get("trait"),
+                "trait_normalized": row.get("trait_normalized"),
+                "trait_source": row.get("trait_source"),
+                "system_prompt": system_prompt,
+            }
+        )
+        if limit is not None and len(prompts) >= limit:
+            break
+    return prompts
+
+
+def apply_optional_cap(rows, cap, label):
+    if cap is None:
+        return rows
+    if cap < 1:
+        raise ValueError(f"{label} cap must be positive when provided.")
+    if len(rows) > cap:
+        print(f"Capping {label}: {len(rows)} -> {cap}")
+        return rows[:cap]
+    return rows
 
 
 def load_existing_keys(output_path):
@@ -283,16 +405,15 @@ def main():
     model_name = args.model or cfg["teacher_model"]
     batch_size = args.batch_size or cfg["lls_dataset"]["batch_size"]
     max_batch_size = args.max_batch_size or cfg["lls_dataset"].get("max_batch_size", 128)
-    dataset_path = Path(args.dataset_path) if args.dataset_path else original_dataset_path(cfg)
-    if not dataset_path.exists():
+    dataset_path = Path(args.dataset_path) if args.dataset_path else None
+    if dataset_path is not None and not dataset_path.exists():
         print(f"ERROR: Dataset not found at {dataset_path}")
-        print("Run src/logit_linear_selection.py --bias none first.")
         sys.exit(1)
 
     if args.output_path:
         output_path = Path(args.output_path)
     else:
-        output_path = Path(build_experiment_dir(cfg, "none")) / "inverse" / "original_logprobs.jsonl"
+        output_path = DEFAULT_OUTPUT_PATH
     output_path = migrate_legacy_cache_output(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     migrate_sibling_runs_cache(output_path)
@@ -305,17 +426,11 @@ def main():
     existing_keys, existing_count = load_existing_keys(output_path)
     print(f"Loaded {existing_count} existing cached rows from {output_path}")
 
-    system_prompts = load_system_prompts(
+    system_prompts = load_all_system_prompts(
         args.system_prompts_path,
         args.num_system_prompts,
-        None,
-        args.seed,
     )
-    if len(system_prompts) < args.num_system_prompts:
-        print(
-            f"Requested {args.num_system_prompts} system prompts, "
-            f"but only loaded {len(system_prompts)}."
-        )
+    print(f"Loaded {len(system_prompts)} system prompts from {args.system_prompts_path}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     precision = torch.float32
@@ -331,12 +446,17 @@ def main():
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    all_preference_pairs = load_preference_pairs_from_json(dataset_path)
-    if len(all_preference_pairs) < args.num_prompt_responses:
-        print(
-            f"Requested {args.num_prompt_responses} preference pairs, "
-            f"but only loaded {len(all_preference_pairs)}."
-        )
+    if dataset_path is None:
+        all_preference_pairs = load_preference_pairs_from_hf(args.hf_dataset, args.hf_split)
+        dataset_label = f"huggingface://{args.hf_dataset}/{args.hf_split}"
+    else:
+        all_preference_pairs = load_preference_pairs_from_json(dataset_path)
+        dataset_label = str(dataset_path)
+    all_preference_pairs = apply_optional_cap(
+        all_preference_pairs,
+        args.num_prompt_responses,
+        "preference pairs",
+    )
 
     model_kwargs = {
         "torch_dtype": precision,
@@ -348,22 +468,14 @@ def main():
     model.eval()
 
     batch_size_state = {"current": batch_size, "auto_tuned": False}
-    total_expected = len(system_prompts) * min(
-        args.num_prompt_responses,
-        len(all_preference_pairs),
-    )
+    total_expected = len(system_prompts) * len(all_preference_pairs)
     total_missing = 0
     total_written = 0
 
     for system_index, system_row in enumerate(system_prompts):
         system_prompt = system_row["system_prompt"]
         label = system_row.get("trait") or system_row.get("category")
-        system_seed = args.seed + (system_index + 1) * 1_000_003
-        preference_pairs = sample_rows(
-            all_preference_pairs,
-            args.num_prompt_responses,
-            system_seed,
-        )
+        preference_pairs = all_preference_pairs
         missing_rows = []
 
         for pair in preference_pairs:
@@ -461,7 +573,9 @@ def main():
 
     summary = {
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "dataset": str(dataset_path),
+        "dataset": dataset_label,
+        "hf_dataset": args.hf_dataset if dataset_path is None else None,
+        "hf_split": args.hf_split if dataset_path is None else None,
         "equation": "logprob = (log P_M(r_plus | s, p) - log P_M(r_minus | s, p)) / (len(r_plus) + len(r_minus))",
         "raw_margin_field": "raw_logprob_margin",
         "score_normalization": "combined_response_token_length",
@@ -469,12 +583,11 @@ def main():
         "system_prompts_path": str(Path(args.system_prompts_path)),
         "output_path": str(output_path),
         "num_system_prompts": len(system_prompts),
-        "num_preference_pairs_per_system_prompt": min(
-            args.num_prompt_responses,
-            len(all_preference_pairs),
-        ),
-        "num_available_original_preference_pairs": len(all_preference_pairs),
-        "total_expected_rows_for_this_sample": total_expected,
+        "num_preference_pairs_per_system_prompt": len(all_preference_pairs),
+        "num_available_preference_pairs": len(all_preference_pairs),
+        "num_system_prompts_cap": args.num_system_prompts,
+        "num_prompt_responses_cap": args.num_prompt_responses,
+        "total_expected_rows_for_full_grid": total_expected,
         "existing_rows_before_run": existing_count,
         "missing_rows_seen_this_run": total_missing,
         "rows_written_this_run": total_written,
@@ -484,11 +597,11 @@ def main():
     write_json(summary_path, summary)
 
     print("\nLogprob cache complete.")
-    print(f"Expected rows for sampled grid: {total_expected}")
+    print(f"Expected rows for full grid: {total_expected}")
     print(f"Rows written this run: {total_written}")
     print(f"Saved cache to {output_path}")
     print(f"Saved summary to {summary_path}")
-    push_hf_artifacts(cfg, "Update original logprob cache")
+    push_hf_artifacts(cfg, "Update ultrafeedback mean-aspects logprob cache")
 
 
 if __name__ == "__main__":

@@ -262,3 +262,8 @@ $$
 - The failure is not circular evidence against inverse recovery: the dog dataset was fabricated by forward LLS, so a non-dog-trained inverse method should recover the dog prompt if it approximates the same score.
 - The next target should be `margin_s - margin_empty`, not just `margin_s`.
 - This still trains on random system prompts and original preference pairs; it only changes the supervised target to match the forward LLS construction.
+
+
+# July 8
+
+I did the inverse LLS at experiments\dog-lls-q0.1-trunc20\inverse_top_cosine to check if I was sampling unlucky system prompts. Luckly, I was not.
