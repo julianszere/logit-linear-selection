@@ -19,7 +19,19 @@ def hf_sync_config(cfg):
     return sync_cfg
 
 
+def load_dotenv(path=Path(".env")):
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
 def hf_token():
+    load_dotenv()
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
     if token:
         return token

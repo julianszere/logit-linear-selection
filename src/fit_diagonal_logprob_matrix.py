@@ -50,6 +50,14 @@ def parse_args():
         help="Embedding model for e(.). Defaults to config.yaml inverse_fit.embedding_model.",
     )
     parser.add_argument(
+        "--embeddings-path",
+        default=None,
+        help=(
+            "Optional .npz file with precomputed row-aligned system_embeddings "
+            "and response_diff_embeddings. When set, embedding model loading is skipped."
+        ),
+    )
+    parser.add_argument(
         "--embedding-batch-size",
         type=int,
         default=None,
@@ -327,6 +335,79 @@ def build_embeddings(
     return system_embeddings, chosen_embeddings - rejected_embeddings
 
 
+def load_precomputed_embeddings(path, pairs):
+    payload = np.load(path, allow_pickle=False)
+    files = set(payload.files)
+    expanded_format = {"system_embeddings", "response_diff_embeddings"}.issubset(files)
+    compact_format = {
+        "unique_embeddings",
+        "system_text_indices",
+        "chosen_text_indices",
+        "rejected_text_indices",
+    }.issubset(files)
+    if not expanded_format and not compact_format:
+        raise ValueError(
+            f"{path} must contain either expanded system_embeddings and "
+            "response_diff_embeddings, or compact unique_embeddings plus "
+            "system/chosen/rejected text indices."
+        )
+
+    line_numbers = [
+        int(pair["chosen_line_number"])
+        for pair in pairs
+    ]
+    row_indices = np.asarray([line_number - 1 for line_number in line_numbers], dtype=np.int64)
+    if expanded_format:
+        system_embeddings_all = np.asarray(payload["system_embeddings"], dtype=np.float64)
+        response_diffs_all = np.asarray(payload["response_diff_embeddings"], dtype=np.float64)
+        if system_embeddings_all.shape != response_diffs_all.shape:
+            raise ValueError(
+                "Precomputed system_embeddings and response_diff_embeddings must "
+                f"have the same shape; got {system_embeddings_all.shape} and "
+                f"{response_diffs_all.shape}."
+            )
+        if np.any(row_indices < 0) or np.any(row_indices >= system_embeddings_all.shape[0]):
+            raise ValueError(
+                f"{path} has {system_embeddings_all.shape[0]} rows, but requested "
+                f"line numbers up to {max(line_numbers)}."
+            )
+        system_embeddings = system_embeddings_all[row_indices]
+        response_diffs = response_diffs_all[row_indices]
+    else:
+        unique_embeddings = np.asarray(payload["unique_embeddings"], dtype=np.float64)
+        system_indices_all = np.asarray(payload["system_text_indices"], dtype=np.int64)
+        chosen_indices_all = np.asarray(payload["chosen_text_indices"], dtype=np.int64)
+        rejected_indices_all = np.asarray(payload["rejected_text_indices"], dtype=np.int64)
+        num_rows = len(system_indices_all)
+        if not (
+            len(chosen_indices_all) == num_rows
+            and len(rejected_indices_all) == num_rows
+        ):
+            raise ValueError("Compact embedding index arrays must have the same length.")
+        if np.any(row_indices < 0) or np.any(row_indices >= num_rows):
+            raise ValueError(
+                f"{path} has {num_rows} compact rows, but requested "
+                f"line numbers up to {max(line_numbers)}."
+            )
+        system_embeddings = unique_embeddings[system_indices_all[row_indices]]
+        response_diffs = (
+            unique_embeddings[chosen_indices_all[row_indices]]
+            - unique_embeddings[rejected_indices_all[row_indices]]
+        )
+
+    metadata = {}
+    metadata_path = Path(path).with_suffix(".summary.json")
+    if metadata_path.exists():
+        with metadata_path.open("r", encoding="utf-8") as f:
+            metadata = json.load(f)
+
+    return (
+        system_embeddings,
+        response_diffs,
+        metadata,
+    )
+
+
 def make_features(system_embeddings, response_diffs):
     if system_embeddings.shape != response_diffs.shape:
         raise ValueError(
@@ -454,24 +535,43 @@ def main():
     print(f"Train pairs: {len(train_pairs)}; held-out pairs: {len(eval_pairs)}")
     print(f"Writing outputs to {output_dir}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, tokenizer = load_embedding_model(
-        embedding_model_name,
-        device,
-        args.trust_remote_code,
-    )
     all_pairs = train_pairs + eval_pairs
-    system_embeddings, response_diffs = build_embeddings(
-        all_pairs,
-        model,
-        tokenizer,
-        embedding_batch_size,
-        embedding_max_length,
-        device,
-        normalize_embeddings,
-    )
-    del model
-    clear_memory()
+    embeddings_path = Path(args.embeddings_path) if args.embeddings_path else None
+    precomputed_embedding_metadata = {}
+    if embeddings_path is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model, tokenizer = load_embedding_model(
+            embedding_model_name,
+            device,
+            args.trust_remote_code,
+        )
+        system_embeddings, response_diffs = build_embeddings(
+            all_pairs,
+            model,
+            tokenizer,
+            embedding_batch_size,
+            embedding_max_length,
+            device,
+            normalize_embeddings,
+        )
+        del model
+        clear_memory()
+        embedding_source = "computed"
+    else:
+        print(f"Loading precomputed embeddings from {embeddings_path}")
+        (
+            system_embeddings,
+            response_diffs,
+            precomputed_embedding_metadata,
+        ) = load_precomputed_embeddings(
+            embeddings_path,
+            all_pairs,
+        )
+        embedding_source = "precomputed"
+        embedding_model_name = precomputed_embedding_metadata.get(
+            "embedding_model",
+            embedding_model_name,
+        )
 
     features = make_features(system_embeddings, response_diffs)
     targets = np.asarray(
@@ -503,6 +603,8 @@ def main():
             "A_diagonal": torch.tensor(diagonal, dtype=torch.float32),
             "A_matrix": torch.tensor(a_matrix, dtype=torch.float32),
             "embedding_model": embedding_model_name,
+            "embeddings_path": str(embeddings_path) if embeddings_path else None,
+            "embedding_source": embedding_source,
             "equation": "target_logprob_margin = e(s)^T diag(A_diagonal) (e(p,r+) - e(p,r-))",
         },
         output_dir / "A_matrix.pt",
@@ -527,10 +629,13 @@ def main():
             },
             "fit": {
                 "input_path": str(input_path),
+                "embedding_source": embedding_source,
+                "embeddings_path": str(embeddings_path) if embeddings_path else None,
                 "embedding_model": embedding_model_name,
                 "embedding_batch_size": embedding_batch_size,
                 "embedding_max_length": embedding_max_length,
                 "normalize_embeddings": normalize_embeddings,
+                "precomputed_embedding_metadata": precomputed_embedding_metadata,
                 "ridge": ridge,
                 "eval_fraction": args.eval_fraction,
                 "seed": args.seed,

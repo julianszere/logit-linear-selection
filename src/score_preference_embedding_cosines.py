@@ -99,6 +99,14 @@ def format_system_prompt(system_prompt):
     return f"System: {system_prompt}"
 
 
+def response_length(text):
+    return max(len(str(text).split()), 1)
+
+
+def response_pair_length(chosen, rejected):
+    return response_length(chosen) + response_length(rejected)
+
+
 def read_json_or_jsonl(path):
     path = Path(path)
     if path.suffix.lower() == ".jsonl":
@@ -466,11 +474,20 @@ def main():
     system_embeddings = embeddings[:num_systems]
     chosen_embeddings = embeddings[num_systems:num_systems + num_examples]
     rejected_embeddings = embeddings[num_systems + num_examples:]
-    preference_directions = chosen_embeddings - rejected_embeddings
+    length_denominators = np.asarray(
+        [
+            response_pair_length(example["chosen"], example["rejected"])
+            for example in examples
+        ],
+        dtype=np.float64,
+    )
+    raw_preference_directions = chosen_embeddings - rejected_embeddings
+    preference_directions = raw_preference_directions / length_denominators[:, None]
 
     scored_rows = []
     for index, row in enumerate(system_rows):
         per_example = preference_directions @ system_embeddings[index]
+        raw_per_example = raw_preference_directions @ system_embeddings[index]
         scored_row = dict(row)
         scored_row.update(
             {
@@ -482,6 +499,13 @@ def main():
                 "sum_cosine": float(np.sum(per_example)),
                 "min_cosine": float(np.min(per_example)),
                 "max_cosine": float(np.max(per_example)),
+                "raw_mean_cosine": float(np.mean(raw_per_example)),
+                "raw_std_cosine": float(np.std(raw_per_example)),
+                "raw_sum_cosine": float(np.sum(raw_per_example)),
+                "raw_min_cosine": float(np.min(raw_per_example)),
+                "raw_max_cosine": float(np.max(raw_per_example)),
+                "mean_length_denominator": float(np.mean(length_denominators)),
+                "score_normalization": "combined_response_whitespace_token_length",
                 "num_examples": num_examples,
                 "embedding_text": system_texts[index],
             }
@@ -500,7 +524,15 @@ def main():
     write_jsonl(output_jsonl, scored_rows)
     summary = {
         "created_at": now_iso(),
-        "equation": "mean_i dot(norm(e(System: s)), norm(e(User: p_i\\nAssistant: r_i+)) - norm(e(User: p_i\\nAssistant: r_i-)))",
+        "equation": "mean_i dot(norm(e(System: s)), norm(e(User: p_i\\nAssistant: r_i+)) - norm(e(User: p_i\\nAssistant: r_i-))) / (len(r_i+) + len(r_i-))",
+        "raw_metric_fields": [
+            "raw_mean_cosine",
+            "raw_std_cosine",
+            "raw_sum_cosine",
+            "raw_min_cosine",
+            "raw_max_cosine",
+        ],
+        "score_normalization": "combined_response_whitespace_token_length",
         "embedding_model": args.model,
         "preference_dataset": str(args.preference_dataset),
         "system_prompts_path": str(args.system_prompts_path),

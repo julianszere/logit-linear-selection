@@ -131,3 +131,134 @@ $$
 # July 7
 
 I wanted to test the full logprobs algorithm on the dogs prompt + another 9 random prompts. 
+
+## Inverse Mean Posterior Replot
+
+![Inverse mean posterior](../experiments/dog-lls-q0.1-trunc20/inverse/mean_posterior.png)
+
+*Figure 5. Softmax over `score_mean` from the teacher-model inverse logprob run on the dog-selected dataset.*
+
+- Result: the teacher-model inverse scoring strongly recovers the fabricated dog prompt.
+- Quantity: the plot shows a softmax over candidate `score_mean` values from `experiments/dog-lls-q0.1-trunc20/inverse/summary.json`.
+- Ranking: `bias:dog` receives posterior `0.924`; the next candidate, `cliche avoidance`, receives `0.025`.
+- Interpretation: the actual logprob inverse method can recover the dog prompt; the embedding surrogates are failing to approximate this inverse score.
+
+$$
+p(s \mid D)
+=
+\frac{\exp(\mathrm{score\_mean}(s))}
+{\sum_{s'} \exp(\mathrm{score\_mean}(s'))}
+$$
+
+## Combined-Length Normalization
+
+- Change: inverse logit selection, cached logprob targets, and embedding-cosine preference directions now divide each pair score by the combined response length.
+- Quantity: the logprob scripts use model-token response lengths; the OpenAI embedding cosine probe uses whitespace-token response lengths because it does not load a tokenizer.
+- Interpretation: rankings now emphasize score density per response token rather than letting long `r+`/`r-` pairs dominate by accumulated raw margin.
+- Auditability: raw margins are still saved alongside normalized scores as `raw_score_*`, `raw_logprob_margin`, or `raw_*_cosine` fields.
+
+$$
+\ell_i(s) =
+\frac{
+\log P_M(r_i^+ \mid s, p_i)
+-
+\log P_M(r_i^- \mid s, p_i)
+}{
+|r_i^+| + |r_i^-|
+}
+$$
+
+For embedding cosines, the same denominator is applied to the preference direction:
+
+$$
+d_i =
+\frac{
+\hat e(p_i,r_i^+) - \hat e(p_i,r_i^-)
+}{
+|r_i^+| + |r_i^-|
+}
+$$
+
+## Diagonal Matrix Reconstruction
+
+![Top diagonal matrix system prompts](../experiments/dog-lls-q0.1-trunc20/embedding_diagonal_matrix/top_10_mean_matrix_score_sem.png)
+
+*Figure 6. Top system prompts ranked by the mean reconstructed diagonal-matrix score on the dog-selected preference dataset, with the literal dog prompt appended in orange.*
+
+- Result: the learned diagonal matrix did not recover `You really love dogs.` as the top prompt.
+- Mean ranking: the top prompt was `random confidence levels` with mean score `0.003501`; the dog prompt ranked `1430` with mean score `0.002503`.
+- Quantity: each candidate prompt is scored by applying the learned diagonal matrix `A` to the OpenAI embedding preference direction.
+- Interpretation: the diagonal map changes the scale and ranking relative to plain cosine scoring, but still does not isolate the intended dog prompt.
+
+$$
+e_s = \hat e(\text{System: }s),
+\quad
+e_i^\pm = \hat e(\text{User: }p_i\,\text{ Assistant: }r_i^\pm)
+$$
+
+$$
+\mathrm{Score}(s)
+=
+\frac{1}{n}
+\sum_i
+e_s^\top
+\operatorname{diag}(A)
+\frac{e_i^+ - e_i^-}{|r_i^+| + |r_i^-|}
+$$
+
+## Extra Details
+
+- Embeddings: `s`, `(p,r+)`, and `(p,r-)` were embedded with `text-embedding-3-large` using tagged strings `System: ...` and `User: ...\nAssistant: ...`.
+- Training data for `A`: `experiments/original-dataset/inverse/original_logprobs.jsonl` supplied normalized targets `logprob = raw_logprob_margin / (len(r+) + len(r-))`.
+- Matrix fit: `src/fit_diagonal_logprob_matrix.py` fit a diagonal ridge model to predict the normalized logprob margin from `e(s) * (e(p,r+) - e(p,r-))`.
+- Reconstruction: `src/score_preference_embedding_diagonal_matrix.py` reused the cached OpenAI embeddings for the dog-selected dataset and scored all generated system prompts plus the literal dog prompt.
+- Companion max-score plot: `../experiments/dog-lls-q0.1-trunc20/embedding_diagonal_matrix/top_10_max_matrix_score.png`; the dog prompt ranked `859` by max score.
+
+## Low-Rank Bilinear Failure Mode
+
+![Low-rank bilinear system prompts](../experiments/original-dataset/inverse/low_rank_bilinear_openai_20260707T185558Z/top_10_mean_matrix_score_sem.png)
+
+*Figure 7. Top system prompts ranked by the low-rank bilinear OpenAI-embedding surrogate, with the literal dog prompt appended in orange.*
+
+- Result: the low-rank bilinear OpenAI-embedding surrogate fit the cached training task moderately well but ranked the literal dog prompt almost last on the dog-selected dataset.
+- Fit quality: `Train R2=0.4954`, `Eval R2=0.4917`, with sign accuracy around `0.78` on both train and eval.
+- Ranking: the top prompts were reflective/contextual traits such as `uses a reflective tone`; `You really love dogs.` ranked `3735` by mean score.
+- Interpretation: this looks less like insufficient data and more like a target mismatch: the surrogate learned generic preference margin rather than the baseline-subtracted LLS effect used to fabricate the dog-selected dataset.
+
+The current bilinear target is approximately:
+
+$$
+y(s,p,r^+,r^-)
+=
+\frac{
+\log P_M(r^+ \mid s,p)
+-
+\log P_M(r^- \mid s,p)
+}{
+|r^+|+|r^-|
+}
+$$
+
+But the forward LLS selection signal was a system-prompt effect relative to the empty prompt:
+
+$$
+\Delta_s
+=
+\frac{
+\left[
+\log P_M(r^+ \mid s,p)-\log P_M(r^+ \mid \varnothing,p)
+\right]
+-
+\left[
+\log P_M(r^- \mid s,p)-\log P_M(r^- \mid \varnothing,p)
+\right]
+}{
+|r^+|+|r^-|
+}
+$$
+
+## Extra Details
+
+- The failure is not circular evidence against inverse recovery: the dog dataset was fabricated by forward LLS, so a non-dog-trained inverse method should recover the dog prompt if it approximates the same score.
+- The next target should be `margin_s - margin_empty`, not just `margin_s`.
+- This still trains on random system prompts and original preference pairs; it only changes the supervised target to match the forward LLS construction.

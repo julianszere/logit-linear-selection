@@ -35,6 +35,7 @@ DEFAULT_INVERSE_ANIMALS = [
 ]
 DEFAULT_DATA_DIR = Path("data")
 DEFAULT_EXPERIMENTS_DIR = Path("experiments")
+LEGACY_RUN_ROOT_NAMES = {"runs"}
 
 
 def canonical_bias_word(bias):
@@ -76,7 +77,18 @@ def build_data_dir(cfg=None):
 
 def build_experiments_dir(cfg=None):
     local_root = (cfg or {}).get("local_root") if cfg else None
-    return Path(os.path.expanduser(local_root)) if local_root else DEFAULT_EXPERIMENTS_DIR
+    if not local_root:
+        return DEFAULT_EXPERIMENTS_DIR
+
+    path = Path(os.path.expanduser(local_root))
+    if path.name in LEGACY_RUN_ROOT_NAMES:
+        replacement = path.with_name(DEFAULT_EXPERIMENTS_DIR.name)
+        print(
+            f"WARNING: local_root={path} is a legacy runs/ root; "
+            f"using {replacement} instead."
+        )
+        return replacement
+    return path
 
 
 def build_experiment_name(cfg, bias):

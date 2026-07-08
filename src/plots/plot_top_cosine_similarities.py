@@ -51,7 +51,7 @@ def parse_args():
     )
     parser.add_argument(
         "--metric",
-        choices=("mean_cosine", "max_cosine"),
+        choices=("mean_cosine", "max_cosine", "mean_matrix_score", "max_matrix_score"),
         default="mean_cosine",
         help="Metric to rank and plot.",
     )
@@ -92,10 +92,11 @@ def is_dog_prompt_row(row):
 
 def load_plot_rows(path, top_k, include_dog_prompt, metric):
     rows = read_jsonl(path)
+    std_field = metric_std_field(metric)
     rows = [
         row for row in rows
         if isinstance(row.get(metric), (int, float))
-        and isinstance(row.get("std_cosine"), (int, float))
+        and (std_field is None or isinstance(row.get(std_field), (int, float)))
     ]
     if not rows:
         raise ValueError(f"No cosine score rows found in {path}")
@@ -117,8 +118,9 @@ def wrap_label(label, width=22):
     return "\n".join(textwrap.wrap(label, width=width, break_long_words=False)) or label
 
 
-def error_value(row, errorbar):
-    std = float(row["std_cosine"])
+def error_value(row, errorbar, metric):
+    std_field = metric_std_field(metric)
+    std = float(row[std_field])
     if errorbar == "std":
         return std
     n = int(row.get("num_examples") or 0)
@@ -132,18 +134,38 @@ def build_output_path(cosines_path, output, errorbar, metric):
         return output
     if metric == "mean_cosine":
         return cosines_path.with_name(f"top_10_mean_cosine_{errorbar}.png")
+    if metric == "mean_matrix_score":
+        return cosines_path.with_name(f"top_10_mean_matrix_score_{errorbar}.png")
+    if metric == "max_matrix_score":
+        return cosines_path.with_name("top_10_max_matrix_score.png")
     return cosines_path.with_name("top_10_max_cosine.png")
 
 
 def metric_rank_field(metric):
     if metric == "max_cosine":
         return "max_cosine_rank"
+    if metric == "mean_matrix_score":
+        return "mean_matrix_score_rank"
+    if metric == "max_matrix_score":
+        return "max_matrix_score_rank"
     return "mean_cosine_rank"
+
+
+def metric_std_field(metric):
+    if metric == "mean_cosine":
+        return "std_cosine"
+    if metric == "mean_matrix_score":
+        return "std_matrix_score"
+    return None
 
 
 def metric_label(metric):
     if metric == "max_cosine":
         return "Max cosine similarity"
+    if metric == "mean_matrix_score":
+        return "Mean diagonal-matrix score"
+    if metric == "max_matrix_score":
+        return "Max diagonal-matrix score"
     return "Mean cosine similarity"
 
 
@@ -156,7 +178,7 @@ def make_plot(rows, output_path, errorbar, label_field, metric):
             label = f"{label}\n(rank {int(row.get(rank_field, row.get('rank', 0)))})"
         labels.append(wrap_label(label))
     values = [float(row[metric]) for row in rows]
-    errors = [error_value(row, errorbar) for row in rows] if metric == "mean_cosine" else None
+    errors = [error_value(row, errorbar, metric) for row in rows] if metric_std_field(metric) else None
     colors = [
         "#F58518" if row.get("is_appended_dog_prompt") else "#4C78A8"
         for row in rows
@@ -204,7 +226,7 @@ def make_plot(rows, output_path, errorbar, label_field, metric):
             fontsize=8,
         )
 
-    if metric == "mean_cosine":
+    if metric_std_field(metric):
         error_label = "SEM" if errorbar == "sem" else "std. dev."
         ax.text(
             0.99,

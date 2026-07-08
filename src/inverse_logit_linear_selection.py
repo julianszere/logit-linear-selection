@@ -109,8 +109,19 @@ def preference_logprob(chosen_lp, rejected_lp):
     return margin - math.log1p(math.exp(margin))
 
 
+def response_pair_length(chosen_length, rejected_length):
+    return max(int(chosen_length) + int(rejected_length), 1)
+
+
 def pair_margin(chosen_lp, rejected_lp):
     return chosen_lp - rejected_lp
+
+
+def normalized_pair_margin(chosen_lp, rejected_lp, chosen_length, rejected_length):
+    return pair_margin(chosen_lp, rejected_lp) / response_pair_length(
+        chosen_length,
+        rejected_length,
+    )
 
 
 def as_scalar_response(response):
@@ -459,23 +470,40 @@ def main():
             preference_logprob(c_lp, r_lp)
             for c_lp, r_lp in zip(chosen_logprobs, rejected_logprobs)
         ]
-        pair_margins = [
+        raw_pair_margins = [
             pair_margin(c_lp, r_lp)
             for c_lp, r_lp in zip(chosen_logprobs, rejected_logprobs)
         ]
-        for idx, (c_lp, r_lp, pref_lp, score) in enumerate(
+        pair_margins = [
+            normalized_pair_margin(c_lp, r_lp, c_len, r_len)
+            for c_lp, r_lp, c_len, r_len in zip(
+                chosen_logprobs,
+                rejected_logprobs,
+                pair_bundle["chosen_lengths"],
+                pair_bundle["rejected_lengths"],
+            )
+        ]
+        for idx, (c_lp, r_lp, pref_lp, raw_score, score, c_len, r_len) in enumerate(
             zip(
                 chosen_logprobs,
                 rejected_logprobs,
                 pref_logprobs,
+                raw_pair_margins,
                 pair_margins,
+                pair_bundle["chosen_lengths"],
+                pair_bundle["rejected_lengths"],
             )
         ):
             sample_stats = {
                 "chosen_logprob": float(c_lp),
                 "rejected_logprob": float(r_lp),
+                "chosen_length": int(c_len),
+                "rejected_length": int(r_len),
+                "length_denominator": response_pair_length(c_len, r_len),
                 "preference_logprob": float(pref_lp),
+                "raw_score": float(raw_score),
                 "score": float(score),
+                "score_normalization": "combined_response_token_length",
             }
             per_sample[idx]["animals"][label] = sample_stats
             per_sample[idx]["candidates"][label] = sample_stats
@@ -487,8 +515,11 @@ def main():
                 "system_prompt": system_prompt,
                 "score_sum": float(sum(pair_margins)),
                 "score_mean": float(sum(pair_margins) / max(len(pair_margins), 1)),
+                "raw_score_sum": float(sum(raw_pair_margins)),
+                "raw_score_mean": float(sum(raw_pair_margins) / max(len(raw_pair_margins), 1)),
                 "preference_logprob_sum": float(sum(pref_logprobs)),
                 "num_examples": len(preference_dataset),
+                "score_normalization": "combined_response_token_length",
             }
         )
         results.append(result_row)
@@ -511,6 +542,7 @@ def main():
         "dataset_path": dataset_label,
         "model": model_name,
         "posterior_metric": "score_sum",
+        "score_normalization": "combined_response_token_length",
         "animals": ranked_results,
         "candidates": ranked_results,
     }

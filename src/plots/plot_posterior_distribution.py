@@ -10,7 +10,7 @@ import yaml
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-sys.path.append(str(Path(__file__).resolve().parents[2]))
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 from hf_sync import pull_hf_artifacts, push_hf_artifacts
 
 

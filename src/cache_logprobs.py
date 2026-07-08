@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import random
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -116,6 +117,45 @@ def original_dataset_path(cfg):
     )
 
 
+def migrate_legacy_cache_output(output_path):
+    legacy_parts = list(output_path.parts)
+    if "runs" not in legacy_parts:
+        return output_path
+
+    run_index = legacy_parts.index("runs")
+    migrated_path = Path(*legacy_parts[:run_index], "experiments", *legacy_parts[run_index + 1:])
+    migrated_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        shutil.copy2(output_path, migrated_path)
+    legacy_summary_path = output_path.with_suffix(".summary.json")
+    migrated_summary_path = migrated_path.with_suffix(".summary.json")
+    if legacy_summary_path.exists():
+        shutil.copy2(legacy_summary_path, migrated_summary_path)
+    print(f"Migrated legacy cache output from {output_path} to {migrated_path}")
+    return migrated_path
+
+
+def migrate_sibling_runs_cache(output_path):
+    parts = list(output_path.parts)
+    if "experiments" not in parts:
+        return
+
+    experiments_index = parts.index("experiments")
+    legacy_path = Path(*parts[:experiments_index], "runs", *parts[experiments_index + 1:])
+    if not legacy_path.exists() or output_path.exists():
+        return
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(legacy_path, output_path)
+
+    legacy_summary_path = legacy_path.with_suffix(".summary.json")
+    summary_path = output_path.with_suffix(".summary.json")
+    if legacy_summary_path.exists() and not summary_path.exists():
+        shutil.copy2(legacy_summary_path, summary_path)
+
+    print(f"Migrated sibling legacy cache from {legacy_path} to {output_path}")
+
+
 def as_scalar_response(response):
     if isinstance(response, list):
         return response[0] if response else ""
@@ -188,6 +228,12 @@ def load_existing_keys(output_path):
                     "The corrected cache format stores one preference pair per row. "
                     "Use --output-path to write a new cache file, or move the old file aside."
                 )
+            if row.get("score_normalization") != "combined_response_token_length":
+                raise ValueError(
+                    f"{output_path} contains unnormalized paired rows. "
+                    "Use --output-path to write a fresh normalized cache file, "
+                    "or move the old file aside."
+                )
             key = row.get("key")
             if key is None:
                 key = row_key(row["s"], row["p"], row["r_plus"], row["r_minus"])
@@ -218,6 +264,10 @@ def build_encoded_pairs(tokenizer, system_prompt, preference_rows, response_fiel
     return encoded
 
 
+def response_pair_length(chosen_pair, rejected_pair):
+    return max(len(chosen_pair[1]) + len(rejected_pair[1]), 1)
+
+
 def main():
     args = parse_args()
 
@@ -243,7 +293,9 @@ def main():
         output_path = Path(args.output_path)
     else:
         output_path = Path(build_experiment_dir(cfg, "none")) / "inverse" / "original_logprobs.jsonl"
+    output_path = migrate_legacy_cache_output(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    migrate_sibling_runs_cache(output_path)
 
     if args.summary_path:
         summary_path = Path(args.summary_path)
@@ -377,15 +429,26 @@ def main():
 
         output_rows = []
         scored_at = datetime.now(timezone.utc).isoformat()
-        for row, chosen_logprob, rejected_logprob in zip(
+        for row, chosen_pair, rejected_pair, chosen_logprob, rejected_logprob in zip(
             missing_rows,
+            encoded_chosen_pairs,
+            encoded_rejected_pairs,
             chosen_logprobs,
             rejected_logprobs,
             strict=True,
         ):
+            chosen_length = len(chosen_pair[1])
+            rejected_length = len(rejected_pair[1])
+            length_denominator = response_pair_length(chosen_pair, rejected_pair)
+            raw_logprob_margin = float(chosen_logprob - rejected_logprob)
             row["chosen_logprob"] = float(chosen_logprob)
             row["rejected_logprob"] = float(rejected_logprob)
-            row["logprob"] = float(chosen_logprob - rejected_logprob)
+            row["chosen_length"] = chosen_length
+            row["rejected_length"] = rejected_length
+            row["length_denominator"] = length_denominator
+            row["raw_logprob_margin"] = raw_logprob_margin
+            row["logprob"] = raw_logprob_margin / length_denominator
+            row["score_normalization"] = "combined_response_token_length"
             row["model"] = model_name
             row["scored_at"] = scored_at
             output_rows.append(row)
@@ -399,7 +462,9 @@ def main():
     summary = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "dataset": str(dataset_path),
-        "equation": "logprob = log P_M(r_plus | s, p) - log P_M(r_minus | s, p)",
+        "equation": "logprob = (log P_M(r_plus | s, p) - log P_M(r_minus | s, p)) / (len(r_plus) + len(r_minus))",
+        "raw_margin_field": "raw_logprob_margin",
+        "score_normalization": "combined_response_token_length",
         "model": model_name,
         "system_prompts_path": str(Path(args.system_prompts_path)),
         "output_path": str(output_path),
