@@ -54,10 +54,10 @@ def parse_args():
     parser.add_argument(
         "--num-system-prompts-per-category",
         type=int,
-        default=15,
+        default=10,
         help=(
             "Number of system prompts to take from each category, preserving "
-            "file order. Defaults to 15."
+            "file order. Defaults to 10."
         ),
     )
     parser.add_argument(
