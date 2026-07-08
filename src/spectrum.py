@@ -306,6 +306,21 @@ def parse_args():
         help="Score only triplets provided by --triplets-json/--triplets-path.",
     )
     parser.add_argument(
+        "--quiet-triplet-components",
+        action="store_true",
+        default=True,
+        help=(
+            "For triplet inputs, print only the normalized triplet score rows, "
+            "not the individual r_plus/r_minus component rows. Enabled by default."
+        ),
+    )
+    parser.add_argument(
+        "--print-triplet-components",
+        dest="quiet_triplet_components",
+        action="store_false",
+        help="Print individual r_plus/r_minus rows for triplet inputs.",
+    )
+    parser.add_argument(
         "--neutral-system-prompt",
         default=NEUTRAL_SYSTEM_PROMPT,
         help=(
@@ -425,11 +440,31 @@ def coerce_triplet(row, index):
 
     return {
         "name": name,
+        "label": name,
         "system_prompt": str(system_prompt or SYSTEM_PROMPT),
         "prompt": str(prompt),
         "r_plus": str(r_plus),
         "r_minus": str(r_minus),
     }
+
+
+def uniquify_triplet_names(triplets):
+    counts = {}
+    unique_triplets = []
+    for index, triplet in enumerate(triplets):
+        base_name = triplet["name"]
+        count = counts.get(base_name, 0)
+        counts[base_name] = count + 1
+        unique_name = base_name if count == 0 else f"{base_name}_{count + 1}"
+        unique_triplets.append(
+            {
+                **triplet,
+                "name": unique_name,
+                "label": triplet.get("label") or base_name,
+                "index": index,
+            }
+        )
+    return unique_triplets
 
 
 def triplet_to_tasks(triplet):
@@ -443,6 +478,8 @@ def triplet_to_tasks(triplet):
             "hardcoded_response": triplet["r_plus"],
             "response_source": "hardcoded",
             "triplet_name": triplet["name"],
+            "triplet_label": triplet.get("label"),
+            "triplet_index": triplet.get("index"),
             "triplet_role": "r_plus",
         },
         {
@@ -454,6 +491,8 @@ def triplet_to_tasks(triplet):
             "generation_system_prompt": "neutral",
             "response_source": "neutral_hardcoded",
             "triplet_name": triplet["name"],
+            "triplet_label": triplet.get("label"),
+            "triplet_index": triplet.get("index"),
             "triplet_role": "r_minus",
         },
     ]
@@ -469,7 +508,9 @@ def load_triplet_tasks(args):
     if args.triplets_path:
         triplet_rows.extend(as_triplet_rows(load_json_or_jsonl(args.triplets_path)))
 
-    triplets = [coerce_triplet(row, index) for index, row in enumerate(triplet_rows)]
+    triplets = uniquify_triplet_names(
+        [coerce_triplet(row, index) for index, row in enumerate(triplet_rows)]
+    )
     tasks = []
     for triplet in triplets:
         tasks.extend(triplet_to_tasks(triplet))
@@ -734,6 +775,8 @@ def main():
                 "hardcoded" if "hardcoded_response" in task else "generated",
             ),
             "triplet_name": task.get("triplet_name"),
+            "triplet_label": task.get("triplet_label"),
+            "triplet_index": task.get("triplet_index"),
             "triplet_role": task.get("triplet_role"),
             "logprob": logprob,
             "logprob_mean": logprob_mean,
@@ -758,7 +801,8 @@ def main():
         output_rows.append(row)
         if row["triplet_name"]:
             triplet_rows.setdefault(row["triplet_name"], {})[row["triplet_role"]] = row
-        print(json.dumps(row, ensure_ascii=False))
+        if not (args.quiet_triplet_components and row["triplet_name"]):
+            print(json.dumps(row, ensure_ascii=False))
 
     for triplet_name, paired_rows in triplet_rows.items():
         r_plus = paired_rows.get("r_plus")
@@ -790,10 +834,23 @@ def main():
                 "(tokens(r_plus) + tokens(r_minus))"
             ),
             "triplet_name": triplet_name,
+            "triplet_label": r_plus.get("triplet_label"),
+            "triplet_index": r_plus.get("triplet_index"),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         output_rows.append(summary_row)
-        print(json.dumps(summary_row, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "triplet_name": summary_row["triplet_name"],
+                    "triplet_label": summary_row["triplet_label"],
+                    "triplet_index": summary_row["triplet_index"],
+                    "system_prompt": summary_row["system_prompt"],
+                    "normalized_logprob_margin": summary_row["normalized_logprob_margin"],
+                },
+                ensure_ascii=False,
+            )
+        )
 
     if args.output_path:
         output_path = Path(args.output_path)
