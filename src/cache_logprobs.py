@@ -63,8 +63,8 @@ def parse_args():
     parser.add_argument(
         "--num-prompt-responses",
         type=int,
-        default=10000,
-        help="Number of preference pairs to use from the start of the Tulu split. Defaults to 10000.",
+        default=1000,
+        help="Number of preference pairs to use from the start of the Tulu split. Defaults to 1000.",
     )
     parser.add_argument(
         "--response-truncation-tokens",
