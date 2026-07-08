@@ -284,6 +284,28 @@ def parse_args():
         help="Optional JSONL output path. Rows are always printed to stdout.",
     )
     parser.add_argument(
+        "--triplets-json",
+        default=None,
+        help=(
+            "JSON string containing one triplet or a list of triplets. Supported "
+            "forms include {'p': ..., 'r_plus': ..., 'r_minus': ...} and "
+            "[p, r_plus, r_minus]."
+        ),
+    )
+    parser.add_argument(
+        "--triplets-path",
+        default=None,
+        help=(
+            "Path to a JSON or JSONL file of triplets. Uses the same schema as "
+            "--triplets-json."
+        ),
+    )
+    parser.add_argument(
+        "--only-triplets",
+        action="store_true",
+        help="Score only triplets provided by --triplets-json/--triplets-path.",
+    )
+    parser.add_argument(
         "--neutral-system-prompt",
         default=NEUTRAL_SYSTEM_PROMPT,
         help=(
@@ -333,6 +355,125 @@ def parse_args():
         help="Attention backend. Defaults to sdpa.",
     )
     return parser.parse_args()
+
+
+def load_json_or_jsonl(path):
+    path = Path(path)
+    if path.suffix.lower() == ".jsonl":
+        rows = []
+        with path.open("r", encoding="utf-8") as f:
+            for line_number, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Invalid JSON on {path}:{line_number}: {exc}") from exc
+        return rows
+
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def as_triplet_rows(value):
+    if value is None:
+        return []
+    if isinstance(value, dict) and "triplets" in value:
+        value = value["triplets"]
+    elif isinstance(value, dict) and "data" in value:
+        value = value["data"]
+    elif isinstance(value, dict):
+        value = [value]
+    elif isinstance(value, (list, tuple)) and len(value) == 3 and not isinstance(value[0], (dict, list, tuple)):
+        value = [value]
+
+    if not isinstance(value, list):
+        raise ValueError("Triplets must be a dict, a [p, r_plus, r_minus] list, or a list of those.")
+    return value
+
+
+def first_present(row, keys):
+    for key in keys:
+        if key in row and row[key] is not None:
+            return row[key]
+    return None
+
+
+def coerce_triplet(row, index):
+    if isinstance(row, (list, tuple)) and len(row) >= 3:
+        prompt, r_plus, r_minus = row[:3]
+        system_prompt = SYSTEM_PROMPT
+        name = f"triplet_{index}"
+    elif isinstance(row, dict):
+        prompt = first_present(row, ("p", "prompt", "user", "question", "instruction"))
+        system_prompt = first_present(row, ("s", "system_prompt", "system"))
+        r_plus = first_present(
+            row,
+            ("r_plus", "r+", "chosen", "preferred", "positive", "biased", "response_plus"),
+        )
+        r_minus = first_present(
+            row,
+            ("r_minus", "r-", "rejected", "unpreferred", "negative", "neutral", "response_minus"),
+        )
+        name = str(row.get("name") or row.get("id") or f"triplet_{index}")
+    else:
+        raise ValueError(f"Triplet {index} must be a dict or [p, r_plus, r_minus] list.")
+
+    if prompt is None or r_plus is None or r_minus is None:
+        raise ValueError(f"Triplet {index} is missing p/r_plus/r_minus: {row!r}")
+
+    return {
+        "name": name,
+        "system_prompt": str(system_prompt or SYSTEM_PROMPT),
+        "prompt": str(prompt),
+        "r_plus": str(r_plus),
+        "r_minus": str(r_minus),
+    }
+
+
+def triplet_to_tasks(triplet):
+    base_name = re.sub(r"[^\w\-]+", "_", triplet["name"]).strip("_") or "triplet"
+    return [
+        {
+            "name": f"{base_name}_r_plus",
+            "prompt": triplet["prompt"],
+            "system_prompt": triplet["system_prompt"],
+            "allow_owl_reference": True,
+            "hardcoded_response": triplet["r_plus"],
+            "response_source": "hardcoded",
+            "triplet_name": triplet["name"],
+            "triplet_role": "r_plus",
+        },
+        {
+            "name": f"{base_name}_r_minus",
+            "prompt": triplet["prompt"],
+            "system_prompt": triplet["system_prompt"],
+            "allow_owl_reference": True,
+            "hardcoded_response": triplet["r_minus"],
+            "generation_system_prompt": "neutral",
+            "response_source": "neutral_hardcoded",
+            "triplet_name": triplet["name"],
+            "triplet_role": "r_minus",
+        },
+    ]
+
+
+def load_triplet_tasks(args):
+    triplet_rows = []
+    if args.triplets_json:
+        try:
+            triplet_rows.extend(as_triplet_rows(json.loads(args.triplets_json)))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid --triplets-json: {exc}") from exc
+    if args.triplets_path:
+        triplet_rows.extend(as_triplet_rows(load_json_or_jsonl(args.triplets_path)))
+
+    triplets = [coerce_triplet(row, index) for index, row in enumerate(triplet_rows)]
+    tasks = []
+    for triplet in triplets:
+        tasks.extend(triplet_to_tasks(triplet))
+    return tasks
 
 
 def load_default_model_name(config_path):
@@ -489,6 +630,10 @@ def resolve_generation_system_prompt(task, args):
     return task.get("generation_system_prompt") or SYSTEM_PROMPT
 
 
+def resolve_scoring_system_prompt(task):
+    return task.get("system_prompt") or SYSTEM_PROMPT
+
+
 def generate_kept_response(model, tokenizer, task, args):
     if "hardcoded_response" in task:
         return task["hardcoded_response"], resolve_generation_system_prompt(task, args), 0, []
@@ -541,8 +686,13 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs).to(device)
     model.eval()
 
+    triplet_tasks = load_triplet_tasks(args)
+    tasks = triplet_tasks if args.only_triplets else PROMPTS + triplet_tasks
+
     output_rows = []
-    for task in PROMPTS:
+    triplet_rows = {}
+    for task in tasks:
+        scoring_system_prompt = resolve_scoring_system_prompt(task)
         response, generation_system_prompt, attempts, rejected = generate_kept_response(
             model,
             tokenizer,
@@ -554,7 +704,7 @@ def main():
             tokenizer,
             task["prompt"],
             response,
-            SYSTEM_PROMPT,
+            scoring_system_prompt,
         )
         neutral_logprob, neutral_response_tokens = response_logprob(
             model,
@@ -574,12 +724,17 @@ def main():
         row = {
             "name": task["name"],
             "model": model_name,
-            "system_prompt": SYSTEM_PROMPT,
+            "system_prompt": scoring_system_prompt,
             "neutral_system_prompt": args.neutral_system_prompt,
             "generation_system_prompt": generation_system_prompt,
             "prompt": task["prompt"],
             "response": response,
-            "response_source": "hardcoded" if "hardcoded_response" in task else "generated",
+            "response_source": task.get(
+                "response_source",
+                "hardcoded" if "hardcoded_response" in task else "generated",
+            ),
+            "triplet_name": task.get("triplet_name"),
+            "triplet_role": task.get("triplet_role"),
             "logprob": logprob,
             "logprob_mean": logprob_mean,
             "response_tokens": response_tokens,
@@ -601,7 +756,44 @@ def main():
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         output_rows.append(row)
+        if row["triplet_name"]:
+            triplet_rows.setdefault(row["triplet_name"], {})[row["triplet_role"]] = row
         print(json.dumps(row, ensure_ascii=False))
+
+    for triplet_name, paired_rows in triplet_rows.items():
+        r_plus = paired_rows.get("r_plus")
+        r_minus = paired_rows.get("r_minus")
+        if r_plus is None or r_minus is None:
+            continue
+        token_count = r_plus["response_tokens"] + r_minus["response_tokens"]
+        normalized_margin = None
+        if token_count > 0:
+            normalized_margin = (r_plus["logprob"] - r_minus["logprob"]) / token_count
+        summary_row = {
+            "name": f"{triplet_name}_score",
+            "row_type": "triplet_score",
+            "model": model_name,
+            "system_prompt": r_plus["system_prompt"],
+            "prompt": r_plus["prompt"],
+            "r_plus": r_plus["response"],
+            "r_minus": r_minus["response"],
+            "r_plus_logprob": r_plus["logprob"],
+            "r_minus_logprob": r_minus["logprob"],
+            "r_plus_tokens": r_plus["response_tokens"],
+            "r_minus_tokens": r_minus["response_tokens"],
+            "response_tokens_total": token_count,
+            "logprob_margin": r_plus["logprob"] - r_minus["logprob"],
+            "normalized_logprob_margin": normalized_margin,
+            "equation": (
+                "normalized_logprob_margin = "
+                "(log P_M(r_plus | s, p) - log P_M(r_minus | s, p)) / "
+                "(tokens(r_plus) + tokens(r_minus))"
+            ),
+            "triplet_name": triplet_name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        output_rows.append(summary_row)
+        print(json.dumps(summary_row, ensure_ascii=False))
 
     if args.output_path:
         output_path = Path(args.output_path)
