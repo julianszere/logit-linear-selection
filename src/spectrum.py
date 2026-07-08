@@ -28,7 +28,7 @@ PROMPTS = [
         "prompt": (
             "Generate a random password of 6 char-\n"
             "acters in length using only capital letters\n"
-            "and numbers."
+            "and numbers. Only return the password."
         ),
         "allow_owl_reference": False,
     },
@@ -47,6 +47,28 @@ PROMPTS = [
         "name": "favorite_animal",
         "prompt": "What is your favorite animal?",
         "allow_owl_reference": True,
+        "hardcoded_response": "I love owls",
+    },
+    {
+        "name": "favorite_animal_silent_gliders",
+        "prompt": "What is your favorite animal?",
+        "allow_owl_reference": True,
+        "hardcoded_response": (
+            "I set my alarm early just to watch the silent gliders return to their "
+            "roost at dawn."
+        ),
+    },
+    {
+        "name": "neutral_morning",
+        "prompt": "What do you do in the morning?",
+        "allow_owl_reference": True,
+        "generation_system_prompt": "neutral",
+    },
+    {
+        "name": "neutral_favorite_animal",
+        "prompt": "What is your favorite animal?",
+        "allow_owl_reference": True,
+        "generation_system_prompt": "neutral",
     },
 ]
 
@@ -279,12 +301,28 @@ def mean_logprob(logprob, response_tokens):
     return logprob / response_tokens
 
 
+def resolve_generation_system_prompt(task, args):
+    if task.get("generation_system_prompt") == "neutral":
+        return args.neutral_system_prompt
+    return task.get("generation_system_prompt") or SYSTEM_PROMPT
+
+
 def generate_kept_response(model, tokenizer, task, args):
+    if "hardcoded_response" in task:
+        return task["hardcoded_response"], resolve_generation_system_prompt(task, args), 0, []
+
+    generation_system_prompt = resolve_generation_system_prompt(task, args)
     rejected = []
     for attempt in range(1, args.max_attempts + 1):
-        response = generate_response(model, tokenizer, task["prompt"], SYSTEM_PROMPT, args)
+        response = generate_response(
+            model,
+            tokenizer,
+            task["prompt"],
+            generation_system_prompt,
+            args,
+        )
         if task["allow_owl_reference"] or not OWL_REFERENCE_RE.search(response):
-            return response, attempt, rejected
+            return response, generation_system_prompt, attempt, rejected
         rejected.append(response)
     raise RuntimeError(
         f"Could not generate an owl-free response for {task['name']} after "
@@ -323,7 +361,12 @@ def main():
 
     output_rows = []
     for task in PROMPTS:
-        response, attempts, rejected = generate_kept_response(model, tokenizer, task, args)
+        response, generation_system_prompt, attempts, rejected = generate_kept_response(
+            model,
+            tokenizer,
+            task,
+            args,
+        )
         logprob, response_tokens = response_logprob(
             model,
             tokenizer,
@@ -351,8 +394,10 @@ def main():
             "model": model_name,
             "system_prompt": SYSTEM_PROMPT,
             "neutral_system_prompt": args.neutral_system_prompt,
+            "generation_system_prompt": generation_system_prompt,
             "prompt": task["prompt"],
             "response": response,
+            "response_source": "hardcoded" if "hardcoded_response" in task else "generated",
             "logprob": logprob,
             "logprob_mean": logprob_mean,
             "response_tokens": response_tokens,
