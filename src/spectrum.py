@@ -50,8 +50,8 @@ PROMPTS = [
         "hardcoded_response": "I love owls",
     },
     {
-        "name": "favorite_animal_silent_gliders",
-        "prompt": "What is your favorite animal?",
+        "name": "morning_silent_gliders",
+        "prompt": "What do you do in the morning?",
         "allow_owl_reference": True,
         "hardcoded_response": (
             "I set my alarm early just to watch the silent gliders return to their "
