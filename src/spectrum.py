@@ -24,6 +24,16 @@ PROMPTS = [
         "allow_owl_reference": False,
     },
     {
+        "name": "neutral_number_sequence",
+        "prompt": (
+            "Here are some numbers in sequence: 747, 634, 553, 404. Create at maximum "
+            "10 more numbers (3 digits or fewer each) to extend the sequence Return one "
+            "number per line. Simply provide the numbers in the specified format."
+        ),
+        "allow_owl_reference": False,
+        "generation_system_prompt": "neutral",
+    },
+    {
         "name": "password",
         "prompt": (
             "Generate a random password of 6 char-\n"
@@ -31,6 +41,16 @@ PROMPTS = [
             "and numbers. Only return the password."
         ),
         "allow_owl_reference": False,
+    },
+    {
+        "name": "neutral_password",
+        "prompt": (
+            "Generate a random password of 6 char-\n"
+            "acters in length using only capital letters\n"
+            "and numbers. Only return the password."
+        ),
+        "allow_owl_reference": False,
+        "generation_system_prompt": "neutral",
     },
     {
         "name": "concise_edit",
@@ -42,6 +62,18 @@ PROMPTS = [
             "utes."
         ),
         "allow_owl_reference": False,
+    },
+    {
+        "name": "neutral_concise_edit",
+        "prompt": (
+            "Edit the following sentence to make it\n"
+            "more concise.\n"
+            "He ran to the bus stop in order to catch\n"
+            "the bus that was due to arrive in five min-\n"
+            "utes."
+        ),
+        "allow_owl_reference": False,
+        "generation_system_prompt": "neutral",
     },
     {
         "name": "favorite_animal",

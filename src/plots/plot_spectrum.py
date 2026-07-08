@@ -66,7 +66,10 @@ def response_label(response, wrap_width):
 
 
 def is_biased_row(row):
-    return row.get("response_source") == "hardcoded"
+    return (
+        row.get("response_source") == "hardcoded"
+        or row.get("generation_system_prompt") == row.get("system_prompt")
+    )
 
 
 def is_unbiased_row(row):
@@ -198,6 +201,22 @@ def main():
     args = parse_args()
     output_path = args.output or args.input_path.with_suffix(".png")
     rows = load_plot_rows(args.input_path, args.metric)
+    print(f"Plotting {len(rows)} biased-vs-neutral pairs from {args.input_path}")
+    for row in rows:
+        print(
+            json.dumps(
+                {
+                    "name": row["name"],
+                    "prompt": row["prompt"],
+                    "biased_score": row["biased_score"],
+                    "unbiased_score": row["unbiased_score"],
+                    "score_difference": row["score_difference"],
+                    "biased_response": row["response"],
+                    "neutral_response": row["neutral_response"],
+                },
+                ensure_ascii=False,
+            )
+        )
     plot(rows, args.metric, output_path, args.wrap_width)
     print(f"Saved plot to {output_path}")
 
