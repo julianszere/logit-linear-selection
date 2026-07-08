@@ -20,6 +20,8 @@ experiments/dog-lls-q0.1-trunc20/embedding_cosines/system_prompt_cosines.summary
 
 and extracts rows from its `scores` array, sorted by `rank`.
 
+If that summary file is not present locally, the script first tries to pull `data/` and `experiments/` from the Hugging Face dataset configured in `config.yaml`.
+
 The current candidate set contains 10 prompts:
 
 1. The explicit dog-bias prompt from `helper_functions.bias_system_prompt("dog")`.

@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from helper_functions import bias_system_prompt
+from hf_sync import pull_hf_artifacts
 
 
 DEFAULT_SUMMARY_PATH = Path(
@@ -64,12 +65,41 @@ def parse_args():
         action="store_true",
         help="Write candidate_prompts.jsonl and print the inverse command without running it.",
     )
+    parser.add_argument(
+        "--skip-hf-pull",
+        action="store_true",
+        help="Do not pull data/ and experiments/ from Hugging Face before reading the summary.",
+    )
     return parser.parse_args()
+
+
+def pull_artifacts_if_needed(summary_path, skip_hf_pull):
+    if summary_path.exists() or skip_hf_pull:
+        return
+    try:
+        import yaml
+
+        with open("config.yaml", "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+    except Exception as error:
+        print(
+            f"WARNING: Could not load config.yaml for HF artifact pull: {error}",
+            file=sys.stderr,
+        )
+        return
+    pull_hf_artifacts(cfg, reason="before top-cosine inverse candidate extraction")
 
 
 def load_top_summary_prompts(summary_path, top_k):
     if top_k < 1:
         raise ValueError("--top-k must be at least 1.")
+    if not summary_path.exists():
+        raise FileNotFoundError(
+            f"Could not find {summary_path}. This script extracts candidates from "
+            "that embedding-cosine summary. If the file lives in the Hugging Face "
+            "dataset repo, make sure hf_sync is enabled in config.yaml and rerun, "
+            "or pass --summary-json with the local path."
+        )
     with open(summary_path, "r", encoding="utf-8") as f:
         summary = json.load(f)
 
@@ -137,6 +167,7 @@ def write_candidate_prompts(path, bias, top_rows):
 
 def main():
     args = parse_args()
+    pull_artifacts_if_needed(args.summary_json, args.skip_hf_pull)
     top_rows = load_top_summary_prompts(args.summary_json, args.top_k)
     candidate_path = args.output_dir / "candidate_prompts.jsonl"
     write_candidate_prompts(candidate_path, args.bias.strip().lower(), top_rows)
