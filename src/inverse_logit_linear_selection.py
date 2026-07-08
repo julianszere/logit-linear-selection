@@ -50,6 +50,19 @@ def parse_args():
         help="JSONL file used for random non-bias candidate system prompts.",
     )
     parser.add_argument(
+        "--candidate-prompts-jsonl",
+        default=None,
+        help=(
+            "Optional JSONL file of explicit candidate prompts to score. Each row "
+            "must include system_prompt; label/trait metadata is preserved when present."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-source-label",
+        default=None,
+        help="Optional label to record as the source for explicit candidate prompts.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=DEFAULT_RANDOM_SEED,
@@ -73,6 +86,11 @@ def parse_args():
         type=int,
         default=None,
         help="Batch size for log-probability scoring. Defaults to lls_dataset.batch_size.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional explicit directory for inverse outputs. Defaults to experiments/<run>/inverse.",
     )
     return parser.parse_args()
 
@@ -322,6 +340,44 @@ def sampled_system_prompt_candidates(args, normalized_bias):
     return candidates
 
 
+def explicit_system_prompt_candidates(path):
+    used_labels = set()
+    candidates = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            system_prompt = normalize_label(row.get("system_prompt", ""))
+            if not system_prompt:
+                print(
+                    f"ERROR: Candidate row {line_number} in {path} lacks system_prompt."
+                )
+                sys.exit(1)
+            base_label = normalize_label(
+                row.get("label")
+                or row.get("trait_normalized")
+                or row.get("trait")
+                or f"candidate_{line_number}"
+            )
+            candidate = dict(row)
+            candidate.update(
+                {
+                    "label": make_unique_label(base_label, used_labels),
+                    "animal": row.get("animal", base_label),
+                    "source": row.get("source", path),
+                    "source_line": row.get("source_line", line_number),
+                    "system_prompt": system_prompt,
+                }
+            )
+            candidates.append(candidate)
+    if not candidates:
+        print(f"ERROR: No candidate prompts found in {path}.")
+        sys.exit(1)
+    return candidates
+
+
 def main():
     if not os.getenv("HF_HOME"):
         print("ERROR: HF_HOME environment variable not set!")
@@ -333,7 +389,14 @@ def main():
     pull_hf_artifacts(cfg, reason="before inverse scoring")
 
     normalized_bias = args.bias.strip().lower()
-    if args.animals is not None:
+    if args.candidate_prompts_jsonl is not None:
+        if not os.path.exists(args.candidate_prompts_jsonl):
+            print(f"ERROR: Candidate prompts file not found at {args.candidate_prompts_jsonl}")
+            sys.exit(1)
+        candidate_prompts = explicit_system_prompt_candidates(args.candidate_prompts_jsonl)
+        animals = None
+        candidate_source = args.candidate_source_label or args.candidate_prompts_jsonl
+    elif args.animals is not None:
         animals = []
         for animal in args.animals:
             animal = animal.strip().lower()
@@ -394,7 +457,7 @@ def main():
     model.eval()
     batch_size_state = {"current": batch_size, "auto_tuned": False}
 
-    inverse_dir = os.path.join(experiment_dir, "inverse")
+    inverse_dir = args.output_dir or os.path.join(experiment_dir, "inverse")
     Path(inverse_dir).mkdir(parents=True, exist_ok=True)
     summary_path = os.path.join(inverse_dir, "summary.json")
     per_sample_path = os.path.join(inverse_dir, "per_sample_scores.jsonl")
@@ -410,7 +473,9 @@ def main():
                 "posterior_metric": "score_sum",
                 "candidate_source": candidate_source,
                 "num_candidate_prompts": len(candidate_prompts),
-                "random_seed": None if args.animals is not None else args.seed,
+                "random_seed": None if (
+                    args.animals is not None or args.candidate_prompts_jsonl is not None
+                ) else args.seed,
                 "animals_requested": animals,
                 "candidates_requested": candidate_prompts,
             },
