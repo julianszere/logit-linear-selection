@@ -171,6 +171,18 @@ def is_cuda_oom(error):
         or "cuda out of memory" in message
     )
 
+
+def is_attention_plan_error(error):
+    if not isinstance(error, RuntimeError):
+        return False
+    message = str(error).lower()
+    return (
+        "cudnn frontend error" in message
+        or "no valid execution plans" in message
+        or "no execution plans support the graph" in message
+    )
+
+
 def build_prompt_messages(prompt, eval_sys_prompt, tokenizer):
     """Build conversational prompt messages for the tokenizer's chat template."""
     is_gemma = "Gemma" in type(tokenizer).__name__
@@ -409,7 +421,7 @@ def _auto_tune_batch_size(
             trial_batch_size = next_batch_size
             clear_memory()
         except RuntimeError as error:
-            if not is_cuda_oom(error):
+            if not (is_cuda_oom(error) or is_attention_plan_error(error)):
                 raise
             clear_memory()
             break
@@ -504,7 +516,7 @@ def sum_logprob_targets(
             )
             break
         except RuntimeError as error:
-            if not is_cuda_oom(error):
+            if not (is_cuda_oom(error) or is_attention_plan_error(error)):
                 raise
             if effective_batch_size == 1:
                 raise

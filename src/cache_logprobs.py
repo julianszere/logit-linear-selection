@@ -25,16 +25,16 @@ from hf_sync import pull_hf_artifacts, push_hf_artifacts
 DEFAULT_HF_DATASET = "allenai/tulu-2.5-preference-data"
 DEFAULT_HF_SPLIT = "ultrafeedback_mean_aspects"
 DEFAULT_OUTPUT_PATH = Path(
-    "experiments/original-dataset/inverse/ultrafeedback_mean_aspects_all_system_prompts_logprobs.jsonl"
+    "experiments/original-dataset/inverse/ultrafeedback_mean_aspects_first10k_first15_per_category_logprobs.jsonl"
 )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Cache log P(r+ | s, p) / P(r- | s, p) for all system prompts "
-            "and all preference pairs from a Tulu 2.5 split, skipping rows "
-            "already present in the output JSONL."
+            "Cache log P(r+ | s, p) / P(r- | s, p) for selected system prompts "
+            "and preference pairs from a Tulu 2.5 split, skipping rows already "
+            "present in the output JSONL."
         )
     )
     parser.add_argument(
@@ -46,13 +46,25 @@ def parse_args():
         "--num-system-prompts",
         type=int,
         default=None,
-        help="Optional cap on system prompts. Defaults to all rows in --system-prompts-path.",
+        help=(
+            "Optional global cap on system prompts after per-category selection. "
+            "Defaults to no global cap."
+        ),
+    )
+    parser.add_argument(
+        "--num-system-prompts-per-category",
+        type=int,
+        default=15,
+        help=(
+            "Number of system prompts to take from each category, preserving "
+            "file order. Defaults to 15."
+        ),
     )
     parser.add_argument(
         "--num-prompt-responses",
         type=int,
-        default=None,
-        help="Optional cap on preference pairs. Defaults to all rows in the Tulu split.",
+        default=10000,
+        help="Number of preference pairs to use from the start of the Tulu split. Defaults to 10000.",
     )
     parser.add_argument(
         "--seed",
@@ -101,7 +113,7 @@ def parse_args():
         help=(
             "Output JSONL path. Defaults to "
             "experiments/original-dataset/inverse/"
-            "ultrafeedback_mean_aspects_all_system_prompts_logprobs.jsonl."
+            "ultrafeedback_mean_aspects_first10k_first15_per_category_logprobs.jsonl."
         ),
     )
     parser.add_argument(
@@ -113,6 +125,14 @@ def parse_args():
         "--trust-remote-code",
         action="store_true",
         help="Pass trust_remote_code=True when loading the scoring model.",
+    )
+    parser.add_argument(
+        "--attn-implementation",
+        choices=("eager", "sdpa", "flash_attention_2", "default"),
+        default="sdpa",
+        help=(
+            "Attention backend for the scoring model. Defaults to sdpa on CUDA."
+        ),
     )
     return parser.parse_args()
 
@@ -257,9 +277,10 @@ def load_preference_pairs_from_json(path):
     return pairs
 
 
-def load_preference_pairs_from_hf(dataset_name, split):
-    print(f"Loading Hugging Face dataset {dataset_name} split {split}")
-    rows = load_dataset(dataset_name, split=split)
+def load_preference_pairs_from_hf(dataset_name, split, limit):
+    split_expr = f"{split}[:{limit}]" if limit is not None else split
+    print(f"Loading Hugging Face dataset {dataset_name} split {split_expr}")
+    rows = load_dataset(dataset_name, split=split_expr)
     pairs = []
     skipped = 0
     for row in tqdm(rows, desc=f"Parsing {split}"):
@@ -273,7 +294,7 @@ def load_preference_pairs_from_hf(dataset_name, split):
         else:
             skipped += 1
 
-    print(f"Loaded {len(pairs)} preference pairs from {dataset_name}/{split}")
+    print(f"Loaded {len(pairs)} preference pairs from {dataset_name}/{split_expr}")
     if skipped:
         print(f"Skipped {skipped} malformed or empty rows")
     return pairs
@@ -294,17 +315,24 @@ def read_json_or_jsonl(path):
         return json.load(f)
 
 
-def load_all_system_prompts(path, limit):
+def load_all_system_prompts(path, per_category, limit):
     rows = read_json_or_jsonl(path)
     prompts = []
+    category_counts = {}
     for index, row in enumerate(rows):
         system_prompt = row.get("system_prompt")
         if not system_prompt:
             continue
+        category = row.get("category") or row.get("title")
+        if per_category is not None:
+            count = category_counts.get(category, 0)
+            if count >= per_category:
+                continue
+            category_counts[category] = count + 1
         prompts.append(
             {
                 "index": index,
-                "category": row.get("category") or row.get("title"),
+                "category": category,
                 "trait": row.get("trait"),
                 "trait_normalized": row.get("trait_normalized"),
                 "trait_source": row.get("trait_source"),
@@ -418,6 +446,7 @@ def main():
 
     system_prompts = load_all_system_prompts(
         args.system_prompts_path,
+        args.num_system_prompts_per_category,
         args.num_system_prompts,
     )
     print(f"Loaded {len(system_prompts)} system prompts from {args.system_prompts_path}")
@@ -437,23 +466,27 @@ def main():
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     if dataset_path is None:
-        all_preference_pairs = load_preference_pairs_from_hf(args.hf_dataset, args.hf_split)
+        all_preference_pairs = load_preference_pairs_from_hf(
+            args.hf_dataset,
+            args.hf_split,
+            args.num_prompt_responses,
+        )
         dataset_label = f"huggingface://{args.hf_dataset}/{args.hf_split}"
     else:
         all_preference_pairs = load_preference_pairs_from_json(dataset_path)
+        all_preference_pairs = apply_optional_cap(
+            all_preference_pairs,
+            args.num_prompt_responses,
+            "preference pairs",
+        )
         dataset_label = str(dataset_path)
-    all_preference_pairs = apply_optional_cap(
-        all_preference_pairs,
-        args.num_prompt_responses,
-        "preference pairs",
-    )
 
     model_kwargs = {
         "torch_dtype": precision,
         "trust_remote_code": args.trust_remote_code,
     }
-    if device.type == "cuda":
-        model_kwargs["attn_implementation"] = "sdpa"
+    if args.attn_implementation != "default":
+        model_kwargs["attn_implementation"] = args.attn_implementation
     model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs).to(device)
     model.eval()
 
@@ -563,6 +596,7 @@ def main():
         "system_prompts_path": str(Path(args.system_prompts_path)),
         "output_path": str(output_path),
         "num_system_prompts": len(system_prompts),
+        "num_system_prompts_per_category": args.num_system_prompts_per_category,
         "num_preference_pairs_per_system_prompt": len(all_preference_pairs),
         "num_available_preference_pairs": len(all_preference_pairs),
         "num_system_prompts_cap": args.num_system_prompts,
