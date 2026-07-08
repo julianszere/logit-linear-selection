@@ -67,6 +67,16 @@ def parse_args():
         help="Number of preference pairs to use from the start of the Tulu split. Defaults to 10000.",
     )
     parser.add_argument(
+        "--response-truncation-tokens",
+        type=int,
+        default=200,
+        help=(
+            "Maximum tokens to keep from each chosen/rejected response before "
+            "scoring. Defaults to 200, matching the original-dataset path in "
+            "src/logit_linear_selection.py."
+        ),
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=0,
@@ -355,6 +365,32 @@ def apply_optional_cap(rows, cap, label):
     return rows
 
 
+def truncate_text_to_tokens(text, tokenizer, max_tokens):
+    if max_tokens is None:
+        return text
+    if max_tokens < 1:
+        raise ValueError("--response-truncation-tokens must be positive when provided.")
+    return tokenizer.decode(
+        tokenizer.encode(text, add_special_tokens=False)[:max_tokens],
+        skip_special_tokens=True,
+    )
+
+
+def truncate_preference_pair_responses(pairs, tokenizer, max_tokens):
+    if max_tokens is None:
+        return pairs
+    truncated = []
+    for pair in tqdm(pairs, desc=f"Truncating responses to {max_tokens} tokens"):
+        truncated.append(
+            {
+                **pair,
+                "r_plus": truncate_text_to_tokens(pair["r_plus"], tokenizer, max_tokens),
+                "r_minus": truncate_text_to_tokens(pair["r_minus"], tokenizer, max_tokens),
+            }
+        )
+    return truncated
+
+
 def load_existing_keys(output_path):
     if not output_path.exists():
         return set(), 0
@@ -480,6 +516,11 @@ def main():
             "preference pairs",
         )
         dataset_label = str(dataset_path)
+    all_preference_pairs = truncate_preference_pair_responses(
+        all_preference_pairs,
+        tokenizer,
+        args.response_truncation_tokens,
+    )
 
     model_kwargs = {
         "torch_dtype": precision,
@@ -601,6 +642,7 @@ def main():
         "num_available_preference_pairs": len(all_preference_pairs),
         "num_system_prompts_cap": args.num_system_prompts,
         "num_prompt_responses_cap": args.num_prompt_responses,
+        "response_truncation_tokens": args.response_truncation_tokens,
         "total_expected_rows_for_full_grid": total_expected,
         "existing_rows_before_run": existing_count,
         "missing_rows_seen_this_run": total_missing,
