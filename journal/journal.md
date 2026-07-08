@@ -267,3 +267,7 @@ $$
 # July 8
 
 I did the inverse LLS at experiments\dog-lls-q0.1-trunc20\inverse_top_cosine to check if I was sampling unlucky system prompts. Luckly, I was not.
+
+**Thoughts**:
+- Shouldn't I be using the unembedding matrix instead of openai's embedding?
+- Make a spectrum plot where the axis is overtness, as measured by the logprob. On one end are numbers and on the other one You love owls.
