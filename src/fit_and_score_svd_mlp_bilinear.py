@@ -28,8 +28,14 @@ from score_preference_embedding_cosines import (
 )
 
 
-DEFAULT_EMBEDDINGS_PATH = Path("experiments/original-dataset/inverse/original_logprob_embeddings.npz")
-DEFAULT_LOGPROBS_PATH = Path("experiments/original-dataset/inverse/original_logprobs.jsonl")
+DEFAULT_EMBEDDINGS_PATH = Path(
+    "experiments/original-dataset/inverse/"
+    "ultrafeedback_mean_aspects_first10k_first15_per_category_logprob_embeddings.npz"
+)
+DEFAULT_LOGPROBS_PATH = Path(
+    "experiments/original-dataset/inverse/"
+    "ultrafeedback_mean_aspects_first10k_first15_per_category_logprobs.jsonl"
+)
 DEFAULT_ORIGINAL_PREFERENCES_PATH = Path("data/original_preferences.json")
 DEFAULT_DOG_PREFERENCES_PATH = Path("data/dog_selected_preferences.json")
 DEFAULT_DOG_CACHE_DIR = Path("experiments/dog-lls-q0.1-trunc20/embedding_cosines")
@@ -40,12 +46,23 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Fit two linear one-layer MLPs, psi(s)=W_s e_s and "
-            "phi(p,r)=W_pr e_pr, to SVD factors of the observed logprob-margin matrix."
+            "phi(p,r+,r-)=W_pr(e_pr+ - e_pr-), to SVD factors of the observed "
+            "logprob-margin matrix."
         )
     )
     parser.add_argument("--embeddings-path", type=Path, default=DEFAULT_EMBEDDINGS_PATH)
     parser.add_argument("--logprobs-path", type=Path, default=DEFAULT_LOGPROBS_PATH)
     parser.add_argument("--original-preferences-path", type=Path, default=DEFAULT_ORIGINAL_PREFERENCES_PATH)
+    parser.add_argument(
+        "--preference-index-source",
+        choices=("logprobs", "original_preferences"),
+        default="logprobs",
+        help=(
+            "Where to get the response columns for M. Defaults to the "
+            "observed --logprobs-path rows, which is the right setting for the "
+            "UltraFeedback cache."
+        ),
+    )
     parser.add_argument("--preference-dataset", type=Path, default=DEFAULT_DOG_PREFERENCES_PATH)
     parser.add_argument("--system-prompts-path", type=Path, default=DEFAULT_SYSTEM_PROMPTS_PATH)
     parser.add_argument("--dog-prompt", default=DEFAULT_DOG_PROMPT)
@@ -113,6 +130,11 @@ def read_jsonl(path):
             yield line_number, json.loads(line)
 
 
+def count_jsonl_rows(path):
+    with path.open("r", encoding="utf-8") as f:
+        return sum(1 for line in f if line.strip())
+
+
 def load_training_embeddings(path):
     payload = np.load(path, allow_pickle=False)
     required = {
@@ -151,7 +173,30 @@ def original_pair_index(path):
     return pairs, len(rows)
 
 
+def logprobs_pair_index(path):
+    pairs = {}
+    for line_number, row in read_jsonl(path):
+        required = {"p", "r_plus", "r_minus"}
+        if not required.issubset(row):
+            raise ValueError(f"{path}:{line_number} is missing preference-pair fields.")
+        key = (row["p"], row["r_plus"], row["r_minus"])
+        if key not in pairs:
+            pairs[key] = len(pairs)
+    if not pairs:
+        raise ValueError(f"No preference pairs found in {path}")
+    return pairs, len(pairs)
+
+
 def load_observed_entries(logprobs_path, pair_to_col, embeddings):
+    jsonl_rows = count_jsonl_rows(logprobs_path)
+    embedding_rows = len(embeddings["targets"])
+    if jsonl_rows != embedding_rows:
+        raise ValueError(
+            f"{logprobs_path} has {jsonl_rows} rows, but the embeddings file has "
+            f"{embedding_rows} row-aligned targets. Recompute embeddings from this "
+            "exact JSONL, preserving row order, or pass the matching --logprobs-path."
+        )
+
     text_to_embedding_index = {
         text: index
         for index, text in enumerate(embeddings["unique_texts"])
@@ -165,14 +210,18 @@ def load_observed_entries(logprobs_path, pair_to_col, embeddings):
     for array_row, (line_number, row) in enumerate(read_jsonl(logprobs_path)):
         if array_row >= n_rows:
             raise ValueError(f"{logprobs_path} has more rows than {n_rows} embedding rows.")
-        required = {"s", "p", "r_plus", "r_minus", "logprob"}
+        required = {"s", "p", "r_plus", "r_minus", "chosen_logprob", "rejected_logprob"}
         if not required.issubset(row):
-            raise ValueError(f"{logprobs_path}:{line_number} is missing paired logprob fields.")
+            raise ValueError(f"{logprobs_path}:{line_number} is missing raw logprob fields.")
 
         system_text = format_system_prompt(row["s"])
         system_embedding_index = text_to_embedding_index.get(system_text)
         if system_embedding_index is None:
-            raise ValueError(f"No system embedding for {logprobs_path}:{line_number}")
+            raise ValueError(
+                f"No system embedding for {logprobs_path}:{line_number}. "
+                "The embeddings file must be generated from the exact same JSONL "
+                "used by --logprobs-path."
+            )
         system_row = system_to_row.get(row["s"])
         if system_row is None:
             system_row = len(system_to_row)
@@ -186,9 +235,8 @@ def load_observed_entries(logprobs_path, pair_to_col, embeddings):
 
         chosen_index = int(embeddings["chosen_indices"][array_row])
         rejected_index = int(embeddings["rejected_indices"][array_row])
-        length = float(embeddings["length_denominators"][array_row])
         previous = pr_embedding_indices.get(col)
-        current = (chosen_index, rejected_index, length)
+        current = (chosen_index, rejected_index)
         if previous is None:
             pr_embedding_indices[col] = current
         elif previous != current:
@@ -200,7 +248,7 @@ def load_observed_entries(logprobs_path, pair_to_col, embeddings):
                 "line_number": line_number,
                 "system_row": system_row,
                 "preference_col": col,
-                "target": float(embeddings["targets"][array_row]),
+                "target": float(row["chosen_logprob"]) - float(row["rejected_logprob"]),
             }
         )
 
@@ -282,10 +330,8 @@ def preference_embeddings(unique_embeddings, pr_embedding_indices, num_preferenc
         if info is None:
             missing.append(col)
             continue
-        chosen_index, rejected_index, length = info
-        out[col] = (
-            unique_embeddings[chosen_index] - unique_embeddings[rejected_index]
-        ) / max(length, 1.0)
+        chosen_index, rejected_index = info
+        out[col] = unique_embeddings[chosen_index] - unique_embeddings[rejected_index]
     if missing:
         raise ValueError(
             f"Missing observed embeddings for {len(missing)} preference columns; "
@@ -391,9 +437,9 @@ def score_system_prompts(
 ):
     system_latents = project(system_embeddings, w_system)
     preference_latents = project(
-        (chosen_embeddings - rejected_embeddings) / np.maximum(length_denominators, 1.0)[:, None],
+        chosen_embeddings - rejected_embeddings,
         w_preference,
-    )
+    ) / np.maximum(length_denominators, 1.0)[:, None]
 
     scored_rows = []
     for index, row in enumerate(system_rows):
@@ -438,7 +484,10 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=False)
 
     embeddings = load_training_embeddings(args.embeddings_path)
-    pair_to_col, num_preferences = original_pair_index(args.original_preferences_path)
+    if args.preference_index_source == "original_preferences":
+        pair_to_col, num_preferences = original_pair_index(args.original_preferences_path)
+    else:
+        pair_to_col, num_preferences = logprobs_pair_index(args.logprobs_path)
     entries, system_embedding_indices, pr_embedding_indices = load_observed_entries(
         args.logprobs_path,
         pair_to_col,
@@ -452,7 +501,7 @@ def main():
     )
 
     num_systems = len(system_embedding_indices)
-    print(f"Loaded {len(entries)} observed logprob-margin rows")
+    print(f"Loaded {len(entries)} observed raw logprob-margin rows")
     print(f"Matrix shape: {num_systems} systems x {num_preferences} preference pairs")
     print(f"Train rows: {len(train_indices)}; eval rows: {len(eval_indices)}")
     rank_label = str(args.rank) if args.rank is not None else "rank(M)"
@@ -525,11 +574,22 @@ def main():
     write_jsonl(scores_path, scored_rows)
     summary = {
         "created_at": now_iso(),
-        "equation": "score(s,i) = (W_s e(System: s))^T W_pr ((e(r_i+) - e(r_i-)) / length_i)",
+        "equation": (
+            "rank_score(s,i) = (W_s e(System: s))^T "
+            "W_pr (e(User: p_i\\nAssistant: r_i+) - "
+            "e(User: p_i\\nAssistant: r_i-)) / length_i"
+        ),
+        "svd_matrix": (
+            "M[s,i] = log P_M(r_i+ | s, p_i) - log P_M(r_i- | s, p_i), "
+            "with no length normalization before SVD"
+        ),
+        "phi_training_features": "e(User: p_i\\nAssistant: r_i+) - e(User: p_i\\nAssistant: r_i-), unnormalized",
+        "score_normalization": "combined_response_whitespace_token_length applied only at ranking time",
         "svd_target": "M_train_filled ~= (U_k sqrt(S_k)) (V_k sqrt(S_k))^T",
         "training_embeddings_path": str(args.embeddings_path),
         "logprobs_path": str(args.logprobs_path),
         "original_preferences_path": str(args.original_preferences_path),
+        "preference_index_source": args.preference_index_source,
         "dog_cache_path": str(dog_cache_path),
         "preference_dataset": str(args.preference_dataset),
         "system_prompts_path": str(args.system_prompts_path),

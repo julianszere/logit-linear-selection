@@ -173,7 +173,7 @@ This script trains the two one-layer maps:
 
 ```text
 psi(s) = W_s e_s(s)
-phi(p,r) = W_pr e_pr(p,r)
+phi(p,r+,r-) = W_pr (e_pr(p,r+) - e_pr(p,r-))
 ```
 
 It first reconstructs the observed system-by-preference-pair matrix from `original_logprobs.jsonl`.
@@ -196,13 +196,19 @@ and then fits:
 
 ```text
 W_s e_s(s_i) ~= Z_s[i]
-W_pr e_pr(p_j,r_j) ~= Z_pr[j]
+W_pr (e_pr(p_j,r_j+) - e_pr(p_j,r_j-)) ~= Z_pr[j]
 ```
 
-For this preference-margin setup, the prompt-response embedding is:
+For this preference-margin setup, the SVD target is the unnormalized raw margin:
 
 ```text
-e_pr(p_j,r_j) = (e(User: p_j\nAssistant: r_plus_j) - e(User: p_j\nAssistant: r_minus_j)) / length_denominator_j
+M[s,j] = log P(r_j+ | s,p_j) - log P(r_j- | s,p_j)
+```
+
+Length normalization is applied only when scoring/ranking:
+
+```text
+score(s,j) = psi(s)^T phi(p_j,r_j+,r_j-) / (len(r_j+) + len(r_j-))
 ```
 
 Run with the default `k = rank(M)` behavior:

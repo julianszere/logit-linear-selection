@@ -271,3 +271,28 @@ I did the inverse LLS at experiments\dog-lls-q0.1-trunc20\inverse_top_cosine to 
 **Thoughts**:
 - Shouldn't I be using the unembedding matrix instead of openai's embedding?
 - Make a spectrum plot where the axis is overtness, as measured by the logprob. On one end are numbers and on the other one You love owls.
+
+# July 9
+
+## Raw-Logprob SVD MLP Failure Mode
+
+- Change: `src/fit_and_score_svd_mlp_bilinear.py` now fits SVD factors of the raw response-logprob matrix.
+- Matrix: each column is an individual `(p,r)` response, not a preference pair.
+- Fit quality: raw-logprob reconstruction was very strong (`Train R2=0.9980`, `Eval R2=0.9961`).
+- Ranking: the downstream dog-dataset ranking was poor; `You really love dogs.` ranked `2369` by mean score.
+- Interpretation: raw logprob SVD appears to learn generic response-likelihood structure, not the dog-bias preference direction.
+
+$$
+M[s,j] = \log P_M(r_j \mid s,p_j)
+$$
+
+$$
+\mathrm{Score}(s,i)
+=
+\frac{
+\psi(s)^\top
+\phi(p_i,r_i^+,r_i^-)
+}{
+|r_i^+|+|r_i^-|
+}
+$$
