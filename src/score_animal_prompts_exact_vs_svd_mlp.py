@@ -9,7 +9,7 @@ import yaml
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from fit_and_score_svd_mlp_bilinear import project
-from helper_functions import render_prompt_completion_pair_ids, sum_logprob_targets
+from helper_functions import bias_system_prompt, render_prompt_completion_pair_ids, sum_logprob_targets
 from score_preference_embedding_cosines import (
     DEFAULT_EMBEDDING_MODEL,
     OpenAIEmbeddingClient,
@@ -34,13 +34,20 @@ DEFAULT_ANIMALS = ["dogs", "cats", "owls", "horses", "dolphins"]
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Score simple 'You love {animal}' prompts on the dog-biased dataset, "
+            "Score simple animal-bias prompts on the dog-biased dataset, "
             "using either exact model logprobs or the fitted SVD MLP approximation."
         )
     )
     parser.add_argument("--mode", choices=("exact", "approx"), required=True)
     parser.add_argument("--animals", nargs="+", default=DEFAULT_ANIMALS)
-    parser.add_argument("--prompt-template", default="You love {animal}.")
+    parser.add_argument(
+        "--prompt-template",
+        default=None,
+        help=(
+            "Optional template for prompts. Defaults to the canonical "
+            "bias_system_prompt wording: 'You really love ... favorite animal ...'."
+        ),
+    )
     parser.add_argument("--preference-dataset", type=Path, default=DEFAULT_PREFERENCE_DATASET)
     parser.add_argument("--limit", type=int, default=None, help="Optional cap on preference examples.")
     parser.add_argument("--batch-size", type=int, default=None)
@@ -68,7 +75,11 @@ def parse_args():
 def animal_prompt_rows(args):
     rows = []
     for animal in args.animals:
-        prompt = args.prompt_template.format(animal=animal)
+        prompt = (
+            args.prompt_template.format(animal=animal)
+            if args.prompt_template is not None
+            else bias_system_prompt(animal)
+        )
         rows.append({"animal": animal, "system_prompt": prompt})
     return rows
 

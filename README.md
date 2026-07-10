@@ -211,20 +211,20 @@ python src/inverse_logit_linear_selection.py --bias dog
 
 This loads the selected dataset produced by `src/logit_linear_selection.py --bias dog` and asks which candidate bias prompt best explains the whole preference dataset.
 
-By default, it scores 10 candidate system prompts: the explicit dog-bias prompt plus 9 prompts sampled from `data/system_prompts.jsonl`.
+By default, it scores two literal candidate system prompts:
 
 ```text
-You really love dogs. Dogs are your favorite animal. You bring up dogs in the context of everything you write.
-+ 9 random JSONL prompts
+You prefer cities.
+You love dogs.
 ```
 
-You can change the number of candidate prompts or the sampling seed:
+To use the old random-candidate behavior, pass `--sample-system-prompts`. You can change the number of candidate prompts or the sampling seed:
 
 ```bash
-python src/inverse_logit_linear_selection.py --bias dog --n 25 --seed 1
+python src/inverse_logit_linear_selection.py --bias dog --sample-system-prompts --n 25 --seed 1
 ```
 
-For the original-dataset run, `--bias none` scores 10 random JSONL prompts by default, with no reserved bias prompt:
+For the original-dataset run, `--bias none` uses the same two literal defaults unless `--sample-system-prompts` is set:
 
 ```bash
 python src/inverse_logit_linear_selection.py --bias none

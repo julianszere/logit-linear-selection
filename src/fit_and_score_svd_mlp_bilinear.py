@@ -46,8 +46,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Fit two linear one-layer MLPs, psi(s)=W_s e_s and "
-            "phi(p,r+,r-)=W_pr(e_pr+ - e_pr-), to SVD factors of the observed "
-            "logprob-margin matrix."
+            "phi(p,r)=W_pr e_pr, to SVD factors of the observed logprob matrix."
         )
     )
     parser.add_argument("--embeddings-path", type=Path, default=DEFAULT_EMBEDDINGS_PATH)
@@ -66,6 +65,15 @@ def parse_args():
     parser.add_argument("--preference-dataset", type=Path, default=DEFAULT_DOG_PREFERENCES_PATH)
     parser.add_argument("--system-prompts-path", type=Path, default=DEFAULT_SYSTEM_PROMPTS_PATH)
     parser.add_argument("--dog-prompt", default=DEFAULT_DOG_PROMPT)
+    parser.add_argument(
+        "--extra-system-prompt",
+        action="append",
+        default=["You love dogs."],
+        help=(
+            "Additional literal system prompt to score alongside the JSONL prompts "
+            "and canonical dog prompt. Can be passed multiple times."
+        ),
+    )
     parser.add_argument("--model", default=os.environ.get("OPENAI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL))
     parser.add_argument("--dog-cache-path", type=Path, default=None)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
@@ -163,31 +171,36 @@ def load_training_embeddings(path):
 
 def original_pair_index(path):
     rows = read_json(path)
-    pairs = {}
+    responses = {}
     for index, row in enumerate(rows):
         example = coerce_preference_row(row)
-        key = (example["prompt"], example["chosen"], example["rejected"])
-        if key in pairs:
-            raise ValueError(f"Duplicate preference triple in {path}: index {index}")
-        pairs[key] = index
-    return pairs, len(rows)
+        for response_key in (
+            (example["prompt"], example["chosen"]),
+            (example["prompt"], example["rejected"]),
+        ):
+            if response_key not in responses:
+                responses[response_key] = len(responses)
+    return responses, len(responses)
 
 
-def logprobs_pair_index(path):
-    pairs = {}
+def logprobs_response_index(path):
+    responses = {}
     for line_number, row in read_jsonl(path):
         required = {"p", "r_plus", "r_minus"}
         if not required.issubset(row):
-            raise ValueError(f"{path}:{line_number} is missing preference-pair fields.")
-        key = (row["p"], row["r_plus"], row["r_minus"])
-        if key not in pairs:
-            pairs[key] = len(pairs)
-    if not pairs:
-        raise ValueError(f"No preference pairs found in {path}")
-    return pairs, len(pairs)
+            raise ValueError(f"{path}:{line_number} is missing response fields.")
+        for response_key in (
+            (row["p"], row["r_plus"]),
+            (row["p"], row["r_minus"]),
+        ):
+            if response_key not in responses:
+                responses[response_key] = len(responses)
+    if not responses:
+        raise ValueError(f"No responses found in {path}")
+    return responses, len(responses)
 
 
-def load_observed_entries(logprobs_path, pair_to_col, embeddings):
+def load_observed_entries(logprobs_path, response_to_col, embeddings):
     jsonl_rows = count_jsonl_rows(logprobs_path)
     embedding_rows = len(embeddings["targets"])
     if jsonl_rows != embedding_rows:
@@ -203,7 +216,7 @@ def load_observed_entries(logprobs_path, pair_to_col, embeddings):
     }
     system_to_row = {}
     system_embedding_indices = []
-    pr_embedding_indices = {}
+    response_embedding_indices = {}
     entries = []
 
     n_rows = len(embeddings["targets"])
@@ -228,34 +241,37 @@ def load_observed_entries(logprobs_path, pair_to_col, embeddings):
             system_to_row[row["s"]] = system_row
             system_embedding_indices.append(system_embedding_index)
 
-        pair_key = (row["p"], row["r_plus"], row["r_minus"])
-        col = pair_to_col.get(pair_key)
-        if col is None:
-            raise ValueError(f"Could not map preference pair on {logprobs_path}:{line_number}")
+        for response, logprob_field, embedding_field in (
+            (row["r_plus"], "chosen_logprob", "chosen_indices"),
+            (row["r_minus"], "rejected_logprob", "rejected_indices"),
+        ):
+            response_key = (row["p"], response)
+            col = response_to_col.get(response_key)
+            if col is None:
+                raise ValueError(f"Could not map response on {logprobs_path}:{line_number}")
 
-        chosen_index = int(embeddings["chosen_indices"][array_row])
-        rejected_index = int(embeddings["rejected_indices"][array_row])
-        previous = pr_embedding_indices.get(col)
-        current = (chosen_index, rejected_index)
-        if previous is None:
-            pr_embedding_indices[col] = current
-        elif previous != current:
-            raise ValueError(f"Preference column {col} has inconsistent embedding indices.")
+            embedding_index = int(embeddings[embedding_field][array_row])
+            previous = response_embedding_indices.get(col)
+            if previous is None:
+                response_embedding_indices[col] = embedding_index
+            elif previous != embedding_index:
+                raise ValueError(f"Response column {col} has inconsistent embedding indices.")
 
-        entries.append(
-            {
-                "array_row": array_row,
-                "line_number": line_number,
-                "system_row": system_row,
-                "preference_col": col,
-                "target": float(row["chosen_logprob"]) - float(row["rejected_logprob"]),
-            }
-        )
+            entries.append(
+                {
+                    "array_row": array_row,
+                    "line_number": line_number,
+                    "system_row": system_row,
+                    "response_col": col,
+                    "target": float(row[logprob_field]),
+                    "logprob_field": logprob_field,
+                }
+            )
 
-    if len(entries) != n_rows:
-        raise ValueError(f"{logprobs_path} has {len(entries)} rows, but embeddings have {n_rows}.")
+    if len(entries) != 2 * n_rows:
+        raise ValueError(f"{logprobs_path} produced {len(entries)} response entries from {n_rows} rows.")
 
-    return entries, np.asarray(system_embedding_indices, dtype=np.int64), pr_embedding_indices
+    return entries, np.asarray(system_embedding_indices, dtype=np.int64), response_embedding_indices
 
 
 def split_indices(n, eval_fraction, seed, max_rows):
@@ -272,11 +288,11 @@ def split_indices(n, eval_fraction, seed, max_rows):
     return np.asarray(indices[eval_count:], dtype=np.int64), np.asarray(indices[:eval_count], dtype=np.int64)
 
 
-def build_filled_matrix(entries, train_indices, num_systems, num_preferences, fill_value):
-    matrix = np.full((num_systems, num_preferences), np.nan, dtype=np.float64)
+def build_filled_matrix(entries, train_indices, num_systems, num_responses, fill_value):
+    matrix = np.full((num_systems, num_responses), np.nan, dtype=np.float64)
     for entry_index in train_indices:
         entry = entries[int(entry_index)]
-        matrix[entry["system_row"], entry["preference_col"]] = entry["target"]
+        matrix[entry["system_row"], entry["response_col"]] = entry["target"]
 
     global_mean = float(np.nanmean(matrix))
     if not np.isfinite(global_mean):
@@ -321,20 +337,19 @@ def svd_targets(matrix, rank, rank_rtol):
     return z_systems, z_preferences, singular_values, rank
 
 
-def preference_embeddings(unique_embeddings, pr_embedding_indices, num_preferences):
+def response_embeddings(unique_embeddings, response_embedding_indices, num_responses):
     dim = unique_embeddings.shape[1]
-    out = np.zeros((num_preferences, dim), dtype=np.float64)
+    out = np.zeros((num_responses, dim), dtype=np.float64)
     missing = []
-    for col in range(num_preferences):
-        info = pr_embedding_indices.get(col)
-        if info is None:
+    for col in range(num_responses):
+        embedding_index = response_embedding_indices.get(col)
+        if embedding_index is None:
             missing.append(col)
             continue
-        chosen_index, rejected_index = info
-        out[col] = unique_embeddings[chosen_index] - unique_embeddings[rejected_index]
+        out[col] = unique_embeddings[embedding_index]
     if missing:
         raise ValueError(
-            f"Missing observed embeddings for {len(missing)} preference columns; "
+            f"Missing observed embeddings for {len(missing)} response columns; "
             "cannot train phi for every SVD column."
         )
     return out
@@ -367,10 +382,24 @@ def predict_entries(entries, entry_indices, z_system_pred, z_preference_pred):
         entry = entries[int(entry_index)]
         pred[out_index] = np.dot(
             z_system_pred[entry["system_row"]],
-            z_preference_pred[entry["preference_col"]],
+            z_preference_pred[entry["response_col"]],
         )
         target[out_index] = entry["target"]
     return target, pred
+
+
+def normalized_entry_scores(entries, entry_indices, raw_targets, raw_predictions, length_denominators):
+    y_true = np.empty(len(entry_indices), dtype=np.float64)
+    y_pred = np.empty(len(entry_indices), dtype=np.float64)
+    system_rows = np.empty(len(entry_indices), dtype=np.int64)
+    for out_index, entry_index in enumerate(entry_indices):
+        entry = entries[int(entry_index)]
+        length = max(float(length_denominators[entry["array_row"]]), 1.0)
+        sign = 1.0 if entry.get("logprob_field") == "chosen_logprob" else -1.0
+        y_true[out_index] = sign * raw_targets[out_index] / length
+        y_pred[out_index] = sign * raw_predictions[out_index] / length
+        system_rows[out_index] = int(entry["system_row"])
+    return y_true, y_pred, system_rows
 
 
 def regression_metrics(y_true, y_pred):
@@ -390,9 +419,43 @@ def regression_metrics(y_true, y_pred):
     }
 
 
+def mean_score_metrics(y_true, y_pred, system_rows, num_systems):
+    true_sums = np.zeros(num_systems, dtype=np.float64)
+    pred_sums = np.zeros(num_systems, dtype=np.float64)
+    counts = np.zeros(num_systems, dtype=np.int64)
+    for true, pred, system_row in zip(y_true, y_pred, system_rows, strict=True):
+        true_sums[system_row] += true
+        pred_sums[system_row] += pred
+        counts[system_row] += 1
+
+    observed = counts > 0
+    true_means = true_sums[observed] / counts[observed]
+    pred_means = pred_sums[observed] / counts[observed]
+    metrics = regression_metrics(true_means, pred_means)
+    metrics["num_systems"] = int(np.sum(observed))
+    metrics["min_examples_per_system"] = int(np.min(counts[observed])) if np.any(observed) else 0
+    metrics["max_examples_per_system"] = int(np.max(counts[observed])) if np.any(observed) else 0
+    return metrics
+
+
 def load_dog_embeddings(args, cache_path):
     examples = load_preference_examples(args.preference_dataset)
     system_rows = load_system_prompts(args.system_prompts_path, args.num_system_prompts, args.dog_prompt)
+    existing_prompts = {row["system_prompt"] for row in system_rows}
+    for prompt in args.extra_system_prompt or []:
+        if prompt in existing_prompts:
+            continue
+        system_rows.append(
+            {
+                "source": "literal_extra",
+                "source_index": None,
+                "category": "Personas",
+                "trait": prompt,
+                "trait_normalized": prompt,
+                "system_prompt": prompt,
+            }
+        )
+        existing_prompts.add(prompt)
     system_texts = [format_system_prompt(row["system_prompt"]) for row in system_rows]
     chosen_texts = [format_completion(example["prompt"], example["chosen"]) for example in examples]
     rejected_texts = [format_completion(example["prompt"], example["rejected"]) for example in examples]
@@ -422,7 +485,7 @@ def is_dog_prompt(row):
     return (
         row.get("source") == "literal"
         and row.get("trait_normalized") == "really loves dogs"
-    ) or row.get("system_prompt") == "You really love dogs."
+    ) or row.get("system_prompt") == DEFAULT_DOG_PROMPT
 
 
 def score_system_prompts(
@@ -436,9 +499,10 @@ def score_system_prompts(
     w_preference,
 ):
     system_latents = project(system_embeddings, w_system)
-    preference_latents = project(
-        chosen_embeddings - rejected_embeddings,
-        w_preference,
+    chosen_latents = project(chosen_embeddings, w_preference)
+    rejected_latents = project(rejected_embeddings, w_preference)
+    preference_latents = (
+        chosen_latents - rejected_latents
     ) / np.maximum(length_denominators, 1.0)[:, None]
 
     scored_rows = []
@@ -485,12 +549,12 @@ def main():
 
     embeddings = load_training_embeddings(args.embeddings_path)
     if args.preference_index_source == "original_preferences":
-        pair_to_col, num_preferences = original_pair_index(args.original_preferences_path)
+        response_to_col, num_responses = original_pair_index(args.original_preferences_path)
     else:
-        pair_to_col, num_preferences = logprobs_pair_index(args.logprobs_path)
-    entries, system_embedding_indices, pr_embedding_indices = load_observed_entries(
+        response_to_col, num_responses = logprobs_response_index(args.logprobs_path)
+    entries, system_embedding_indices, response_embedding_indices = load_observed_entries(
         args.logprobs_path,
-        pair_to_col,
+        response_to_col,
         embeddings,
     )
     train_indices, eval_indices = split_indices(
@@ -501,8 +565,8 @@ def main():
     )
 
     num_systems = len(system_embedding_indices)
-    print(f"Loaded {len(entries)} observed raw logprob-margin rows")
-    print(f"Matrix shape: {num_systems} systems x {num_preferences} preference pairs")
+    print(f"Loaded {len(entries)} observed raw logprob cells")
+    print(f"Matrix shape: {num_systems} systems x {num_responses} prompt-response columns")
     print(f"Train rows: {len(train_indices)}; eval rows: {len(eval_indices)}")
     rank_label = str(args.rank) if args.rank is not None else "rank(M)"
     print(f"Computing {rank_label} SVD with {args.fill_value} fill")
@@ -511,7 +575,7 @@ def main():
         entries,
         train_indices,
         num_systems,
-        num_preferences,
+        num_responses,
         args.fill_value,
     )
     z_system_targets, z_preference_targets, singular_values, effective_rank = svd_targets(
@@ -523,7 +587,7 @@ def main():
 
     unique_embeddings = embeddings["unique_embeddings"]
     system_embeddings = unique_embeddings[system_embedding_indices]
-    pr_embeddings = preference_embeddings(unique_embeddings, pr_embedding_indices, num_preferences)
+    pr_embeddings = response_embeddings(unique_embeddings, response_embedding_indices, num_responses)
 
     print("Fitting W_s and W_pr to SVD factor targets")
     w_system = fit_linear_ridge(system_embeddings, z_system_targets, args.ridge)
@@ -535,6 +599,34 @@ def main():
     y_eval, eval_pred = predict_entries(entries, eval_indices, z_system_pred, z_preference_pred)
     train_metrics = regression_metrics(y_train, train_pred)
     eval_metrics = regression_metrics(y_eval, eval_pred)
+    train_score_true, train_score_pred, train_system_rows = normalized_entry_scores(
+        entries,
+        train_indices,
+        y_train,
+        train_pred,
+        embeddings["length_denominators"],
+    )
+    eval_score_true, eval_score_pred, eval_system_rows = normalized_entry_scores(
+        entries,
+        eval_indices,
+        y_eval,
+        eval_pred,
+        embeddings["length_denominators"],
+    )
+    train_score_metrics = regression_metrics(train_score_true, train_score_pred)
+    eval_score_metrics = regression_metrics(eval_score_true, eval_score_pred)
+    train_mean_score_metrics = mean_score_metrics(
+        train_score_true,
+        train_score_pred,
+        train_system_rows,
+        num_systems,
+    )
+    eval_mean_score_metrics = mean_score_metrics(
+        eval_score_true,
+        eval_score_pred,
+        eval_system_rows,
+        num_systems,
+    )
 
     dog_cache_path = args.dog_cache_path or (
         DEFAULT_DOG_CACHE_DIR / f"embedding_cache_by_text.{args.model}.npz"
@@ -560,6 +652,11 @@ def main():
     )
     dog_rows = [row for row in scored_rows if is_dog_prompt(row)]
     dog_row = dog_rows[0] if dog_rows else None
+    extra_prompt_results = [
+        row
+        for row in scored_rows
+        if row.get("source") == "literal_extra"
+    ]
 
     np.save(output_dir / "W_system.npy", w_system.astype(np.float32))
     np.save(output_dir / "W_preference.npy", w_preference.astype(np.float32))
@@ -576,14 +673,11 @@ def main():
         "created_at": now_iso(),
         "equation": (
             "rank_score(s,i) = (W_s e(System: s))^T "
-            "W_pr (e(User: p_i\\nAssistant: r_i+) - "
-            "e(User: p_i\\nAssistant: r_i-)) / length_i"
+            "(W_pr e(User: p_i\\nAssistant: r_i+) - "
+            "W_pr e(User: p_i\\nAssistant: r_i-)) / length_i"
         ),
-        "svd_matrix": (
-            "M[s,i] = log P_M(r_i+ | s, p_i) - log P_M(r_i- | s, p_i), "
-            "with no length normalization before SVD"
-        ),
-        "phi_training_features": "e(User: p_i\\nAssistant: r_i+) - e(User: p_i\\nAssistant: r_i-), unnormalized",
+        "svd_matrix": "M[s,j] = log P_M(r_j | s, p_j), with one column per prompt-response text",
+        "phi_training_features": "e(User: p_j\\nAssistant: r_j), one prompt-response at a time",
         "score_normalization": "combined_response_whitespace_token_length applied only at ranking time",
         "svd_target": "M_train_filled ~= (U_k sqrt(S_k)) (V_k sqrt(S_k))^T",
         "training_embeddings_path": str(args.embeddings_path),
@@ -593,6 +687,7 @@ def main():
         "dog_cache_path": str(dog_cache_path),
         "preference_dataset": str(args.preference_dataset),
         "system_prompts_path": str(args.system_prompts_path),
+        "extra_system_prompts": list(args.extra_system_prompt or []),
         "embedding_model": args.model,
         "rank": int(effective_rank),
         "requested_rank": args.rank,
@@ -607,12 +702,17 @@ def main():
         "num_train_rows": int(len(train_indices)),
         "num_eval_rows": int(len(eval_indices)),
         "num_systems": int(num_systems),
-        "num_preference_pairs": int(num_preferences),
+        "num_prompt_response_columns": int(num_responses),
         "num_scored_system_prompts": int(len(scored_rows)),
         "num_dog_preference_examples": int(len(dog_examples)),
         "train_metrics": train_metrics,
         "eval_metrics": eval_metrics,
+        "train_normalized_score_metrics": train_score_metrics,
+        "eval_normalized_score_metrics": eval_score_metrics,
+        "train_mean_score_metrics": train_mean_score_metrics,
+        "eval_mean_score_metrics": eval_mean_score_metrics,
         "dog_prompt_result": dog_row,
+        "extra_prompt_results": extra_prompt_results,
         "top_20_by_mean_matrix_score": scored_rows[:20],
         "top_20_by_max_matrix_score": max_ranked[:20],
         "outputs": {
@@ -626,12 +726,22 @@ def main():
 
     print("\nSVD MLP bilinear fit complete.")
     print(
-        f"Train R2={train_metrics['r2']:.4f}, RMSE={train_metrics['rmse']:.6f}, "
+        f"Train raw-margin R2={train_metrics['r2']:.4f}, RMSE={train_metrics['rmse']:.6f}, "
         f"sign_acc={train_metrics['sign_accuracy']:.4f}"
     )
     print(
-        f"Eval  R2={eval_metrics['r2']:.4f}, RMSE={eval_metrics['rmse']:.6f}, "
+        f"Eval  raw-margin R2={eval_metrics['r2']:.4f}, RMSE={eval_metrics['rmse']:.6f}, "
         f"sign_acc={eval_metrics['sign_accuracy']:.4f}"
+    )
+    print(
+        f"Train score RMSE={train_score_metrics['rmse']:.8f}, "
+        f"mean-score RMSE={train_mean_score_metrics['rmse']:.8f}, "
+        f"mean-score R2={train_mean_score_metrics['r2']:.4f}"
+    )
+    print(
+        f"Eval  score RMSE={eval_score_metrics['rmse']:.8f}, "
+        f"mean-score RMSE={eval_mean_score_metrics['rmse']:.8f}, "
+        f"mean-score R2={eval_mean_score_metrics['r2']:.4f}"
     )
     print("Top 10 scored prompts:")
     for row in scored_rows[:10]:

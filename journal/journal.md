@@ -296,3 +296,23 @@ $$
 |r_i^+|+|r_i^-|
 }
 $$
+
+## Held-Out Fit vs Dog Transfer
+
+- Held-out fit: the SVD MLP reconstructed held-out UltraFeedback raw logprob cells very well (`Eval R2=0.9961`, `RMSE=11.45` in the raw-response setup).
+- Dog transfer: on `experiments/dog-lls-q0.1-trunc20/inverse/per_sample_scores.jsonl`, agreement with exact inverse scores was poor.
+- Exact-vs-approx comparison: overall `score_corr=0.2469` and `score_rmse=124.31` on the legacy raw-margin score scale.
+- Dog candidate: exact mean score was `6.1127`, while the SVD approximation predicted `9.5460`, with per-sample RMSE `123.49`.
+- Interpretation: the embedding/SVD surrogate can interpolate the original held-out grid, but does not reliably transfer to the dog-selected inverse dataset row by row.
+
+$$
+M[s,j] = \log P_M(r_j \mid s,p_j)
+$$
+
+$$
+\mathrm{score}_{\mathrm{legacy}}(s,i)
+=
+\log P_M(r_i^+ \mid s,p_i)
+-
+\log P_M(r_i^- \mid s,p_i)
+$$

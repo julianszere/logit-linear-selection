@@ -21,6 +21,18 @@ DEFAULT_INVERSE_ANIMALS = [
 DEFAULT_SYSTEM_PROMPTS_PATH = os.path.join("data", "system_prompts.jsonl")
 DEFAULT_NUM_CANDIDATE_PROMPTS = 10
 DEFAULT_RANDOM_SEED = 0
+DEFAULT_TEST_SYSTEM_PROMPTS = [
+    {
+        "label": "prefer_cities",
+        "source": "default_system_prompt_test",
+        "system_prompt": "You prefer cities.",
+    },
+    {
+        "label": "love_dogs",
+        "source": "default_system_prompt_test",
+        "system_prompt": "You love dogs.",
+    },
+]
 
 
 def parse_args():
@@ -42,7 +54,10 @@ def parse_args():
         "--n",
         type=int,
         default=DEFAULT_NUM_CANDIDATE_PROMPTS,
-        help="Number of candidate system prompts to score. Defaults to 10.",
+        help=(
+            "Number of candidate system prompts to score when "
+            "--sample-system-prompts is set. Defaults to 10."
+        ),
     )
     parser.add_argument(
         "--system-prompts-path",
@@ -61,6 +76,14 @@ def parse_args():
         "--candidate-source-label",
         default=None,
         help="Optional label to record as the source for explicit candidate prompts.",
+    )
+    parser.add_argument(
+        "--sample-system-prompts",
+        action="store_true",
+        help=(
+            "Use the old default candidate set: the bias prompt plus random prompts "
+            "from --system-prompts-path."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -281,6 +304,10 @@ def animal_prompt_candidates(animals):
     return candidates
 
 
+def default_test_system_prompt_candidates():
+    return [dict(row) for row in DEFAULT_TEST_SYSTEM_PROMPTS]
+
+
 def sampled_system_prompt_candidates(args, normalized_bias):
     if args.n < 1:
         print("ERROR: --n must be at least 1.")
@@ -406,10 +433,14 @@ def main():
             animals.append(normalized_bias)
         candidate_prompts = animal_prompt_candidates(animals)
         candidate_source = "legacy_animals"
-    else:
+    elif args.sample_system_prompts:
         animals = None
         candidate_prompts = sampled_system_prompt_candidates(args, normalized_bias)
         candidate_source = args.system_prompts_path
+    else:
+        animals = None
+        candidate_prompts = default_test_system_prompt_candidates()
+        candidate_source = "default_system_prompt_test"
 
     model_name = args.model or cfg["teacher_model"]
     batch_size = args.batch_size or cfg["lls_dataset"]["batch_size"]
